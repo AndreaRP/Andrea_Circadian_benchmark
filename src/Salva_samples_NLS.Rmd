@@ -1,0 +1,2697 @@
+---
+title: "Salva samples NLS vs JTK"
+author: "Andrea Rubio-Ponce"
+date: "`r format(Sys.time(), '%m, %Y')`"
+output: 
+  pdf_document: 
+    dev: pdf
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+documentclass: article
+urlcolor: blue
+classoption: a4paper
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{float}
+---
+
+```{r setup}
+# Functions, Constants and graphical variables      
+knitr::opts_knit$set(root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/")
+require("knitr")
+knitr::opts_chunk$set(
+      	fig.align = "center",
+      	fig.path = "/data3/arubio/projects/Andrea_Circadian_benchmark/RESULTS/Salva/plots/",
+      	fig.pos = "H",
+      	message = FALSE,
+      	warning = FALSE,
+      	dev = c("pdf", "png"),
+      	dpi = 500,
+      	# include = FALSE,
+      	root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/"
+)
+setwd("/data3/arubio/projects/Andrea_Circadian_benchmark/")
+knitr::opts_knit$get("root.dir")
+getwd()
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library("mouse4302.db")
+library("pheatmap")
+library("RColorBrewer")
+library("affy")
+library("limma")
+library("tximport")
+library("edgeR")
+library("sva")
+library("RColorBrewer")
+library("pheatmap")
+library("biomaRt")
+library("ggplot2")
+library("gplots")
+library("NMF")
+library("cluster")
+library("fpc")
+library("plyr")
+library("sva")
+library("VennDiagram")
+library("gProfileR") # GO
+library("knitr")
+library("xtable")
+library("MetaCycle")
+library("knitcitations")
+library("HarmonicRegression")
+library("dplyr")
+library("reshape2")
+library("AnnotationDbi")
+# source("https://bioconductor.org/biocLite.R")
+
+library("affy")
+library("readxl")
+library("broom")
+source("./SRC/Regression_lib.R")
+source("./SW/JTKversion3/JTK_CYCLEv3.1.R")
+
+dir.create("./RESULTS/Salva/files/", recursive = T)
+cite_options(citation_format = "compatibility",
+hyperlink = FALSE, cite.style = "authoryear", super = FALSE,
+max.names = 1, longnamesfirst = FALSE, check.entries = FALSE)
+```
+
+# Description
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# jtk_results <- read.csv("../Ivan_Neutrophils_circadian_Liver/RESULTS/Salva/files/jtk_wt_result_liver.csv", row.names = 1)
+# # Select pval genes
+# pval <- jtk_results[which(jtk_results$ADJ.P<0.05),]
+# qval <- jtk_results[which(jtk_results$BH.Q<0.05),]
+
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# import "phenotype" data, describing the experimental design
+s2c <- read.table("./RAW/Salva_SCs/s2c.txt", sep="\t", header = T, stringsAsFactors = F)
+# s2c$ind <- sapply(strsplit(s2c$file, "_|\\."), "[[", 5)
+s2c$ind <- rep(1:4, times=6)
+s2c$GEO <- sapply(strsplit(s2c$file, "_|\\."), "[[", 1)
+s2c$sample <- paste(s2c$group, s2c$time, s2c$ind, sep="_")
+s2c <- s2c %>% dplyr::select("sample", everything()) 
+s2c$condition <- paste(s2c$group, s2c$time, sep="_")
+s2c <- s2c[order(s2c$group, s2c$time),]
+# read their data table
+# exprs <- read.csv("./RAW/Salva_SCs/data/GSE84511_expression_matrix.txt", sep="\t", row.names = 1)
+# rownames(exprs) <- gsub("PM_", "", rownames(exprs))
+# if (colnames(exprs) == s2c$GEO){
+#     colnames(exprs) <- s2c$sample
+# }
+# exprs$PROBE_ID <- rownames(exprs)
+# exprs <- exprs %>% dplyr::select("PROBE_ID", everything())
+
+# Make my own data table
+if (!file.exists("./RAW/Salva_SCs/data/CEL_norm_data.csv")){
+  # Now we can add metadata to the s2c data frame
+  metadata <- data.frame(labeldescription=c("sample", "time", "group", "file", "ind", "geo"))
+  # Costruct the Annotated Data Frame using the Pdata data frame and the metadata
+  phenoData <- new ("AnnotatedDataFrame", data=s2c, varMetadata=metadata)
+  # Load CEL files (the chip description will be downloaded automatically)
+  eset <- justRMA(phenoData=phenoData, celfile.path=file.path("./RAW/Salva_SCs/data/"))
+  exprs <- exprs(eset)
+  exprs <- as.data.frame(exprs)
+  # Change col names
+  exprs <- exprs[which(rowSums(exprs)!=0),]
+  if (all(colnames(exprs) == s2c$file)){
+    colnames(exprs) <- s2c$sample
+  }
+  # Change row names (probes have a PM thingy in the middle
+  rownames(exprs) <- gsub("PM_", "", rownames(exprs))
+  # Add probe row
+  exprs$PROBE_ID <- rownames(exprs)
+  exprs <- exprs %>% dplyr::select("PROBE_ID", everything())
+  # write.csv(exprs, "./RAW/Salva_SCs/data/CEL_norm_data.csv")
+}else{
+  exprs <- read.csv("./RAW/Salva_SCs/data/CEL_norm_data.csv", row.names = 1)
+}
+
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Anotate
+probes <- as.character(rownames(exprs))
+# columns(mouse4302.db)
+p2g <- AnnotationDbi::select(mouse4302.db, keys=probes, columns=c("SYMBOL","GENENAME", "ENSEMBL"))
+p2g.ensembl <- ddply(unique(p2g[,c("PROBEID","ENSEMBL")])
+                  , .(PROBEID)
+                  , summarize
+                  , ENSEMBL = paste(toString(ENSEMBL)))
+
+# Group descriptions by gene (one probeid can have more than one gene name)
+p2g.annot <- ddply(p2g[,c("PROBEID", "SYMBOL","GENENAME")]
+                  , .(PROBEID)
+                  , summarize
+                  , DESCRIPTION = paste(toString(paste(SYMBOL, ": ", GENENAME, sep=""))))
+p2g.annot$SYMBOL <- sapply(strsplit(p2g.annot$DESCRIPTION, ":"), "[[", 1)
+
+affymetrix.data <- merge(exprs, p2g.annot, by.x = 0, by.y="PROBEID", all.x = T)
+rownames(affymetrix.data) <- affymetrix.data$Row.names
+affymetrix.data <- affymetrix.data[,-1]
+if (!file.exists("./RAW/Salva_SCs/data/CEL_norm_data_annot.csv")){
+  # write.csv(affymetrix.data, "./RAW/Salva_SCs/data/CEL_norm_data_annot.csv")
+}
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+'%!in%' <- function(x,y)!('%in%'(x,y))
+go.terms <- function(gene.list){
+  sel.genes <- gene.list
+  # Gene universe
+  all.genes <- unique(p2g.ensembl$ENSEMBL)
+  all.genes <- unlist(strsplit(all.genes, ","))
+  all.genes <- all.genes[complete.cases(all.genes)]
+  # Query
+  go.data <- gprofiler(sel.genes
+                       , organism = "mmusculus"
+                       , ordered_query = F
+                       , significant = T
+                       , exclude_iea = F
+                       , underrep = F
+                       , evcodes = F
+                       , region_query = F
+                       , max_p_value = 0.05
+                       , min_set_size = 0
+                       , max_set_size = 0
+                       , min_isect_size = 0
+                       , correction_method = "fdr"
+                       , hier_filtering = "none"
+                       , domain_size = "annotated"
+                       , custom_bg = all.genes
+                       , numeric_ns = ""
+                       , png_fn = F
+                       , include_graph = T
+                       , src_filter = c("GO:BP"
+                                        # , "KEGG"
+                                        # , "TF"
+                                        ))
+# Reformat table
+if (dim(go.data)[1]>0){  
+  go.data$term.id <- gsub(":", ": ", go.data$term.id)
+  go.data$term.name <- gsub("; motif:.*", "", go.data$term.name)
+  go.data$term.name.fancy <- apply(go.data, 1
+                                   , function(x) if (nchar(x["term.name"])>60) paste(substr(x["term.name"], 0, 59)
+                                                                                     , "...", sep="") else x["term.name"])
+  go.data <- go.data[, c("term.name", "term.id", "domain","term.size"
+                         , "overlap.size",  "subgraph.number", "p.value"
+                         , "query.size", "intersection", "precision", "term.name.fancy")]
+colnames(go.data) <- c("GO Term", "Term ID", "Domain","Term size", "Hits"
+                       , "subgraph.number", "p.value", "query.size"
+                       , "Genes", "Precision", "Term Name")
+}else{
+      go.data <- go.data[, c("term.name", "term.id", "domain","term.size"
+                             , "overlap.size",  "subgraph.number", "p.value"
+                             , "query.size", "intersection", "precision")]
+      colnames(go.data) <- c("GO Term", "Term ID", "Domain","Term size", "Hits"
+                             , "subgraph.number", "p.value", "query.size", "Genes", "Precision")
+}
+  go.data <- go.data[order(go.data$p.value),]
+  return(go.data)
+}
+
+david.go <- function(gene.list){
+  # Create connection
+  david <- DAVIDWebService(email="arubio@cnic.es"
+                           , url="https://david.ncifcrf.gov/webservice/services/DAVIDWebService.DAVIDWebServiceHttpSoap12Endpoint/")
+  # Set categories
+  setAnnotationCategories(david, c("GOTERM_BP_5"
+                                 # , "GOTERM_BP_ALL"
+                                 ))
+  # Set the gene and background lists
+  addList( david
+          , inputIds = gene.list
+          , idType = "ENSEMBL_GENE_ID"
+          , listName = "list"
+          , listType = "Gene")
+  
+  # Background list
+  # addList( david
+  #          , inputIds = c("Arntl", "Cxcl12", "p53")
+  #          , idType = "ENSEMBL_GENE_ID"
+  #          , listName = "universe"
+  #          , listType = "Background")
+  
+  # Get annotation
+  david.terms <- getFunctionalAnnotationChart(david)
+  david.terms$GO <- gsub("~.*", "", david.terms$Term)
+  david.terms$Term <- gsub(".*~", "", david.terms$Term)
+  david.terms[,c("Category", "GO", "Term", "Count", "X.", "PValue", "Benjamini", "Bonferroni", "FDR", "Faged.Enrichment", "List.Total", "Pop.Hits", "Pop.Total", "Genes")]
+  return(david.terms)
+}
+
+# paired <- rev(brewer.pal(12, "Paired"))
+# map.colors <- list(condition = setNames(paired, unique(s2c$group)))
+# time.color <- as.character(unlist(map.colors))
+
+
+# hmcol <- brewer.pal(11,"RdBu")
+# hmcol <- rev(hmcol) # Invert Red and Blue
+
+# n=11
+# colfunc <- colorRampPalette(c("#00FF00","#330033","#FF0000"))
+# hmcol <- rev(colfunc(n))
+hmcol <- colorRampPalette(c("#76a5f7","#0c001c", "#ff1d00"))(100) # blue red
+n=6
+colfunc<- colorRampPalette(c("#FFC300", "#C70039", "#1a237e"))
+day.color <- colfunc(n)
+map.colors <- list(condition = setNames(rep(day.color,2), unique(s2c[order(s2c$group, s2c$time),"condition"])))
+time.color <- as.character(unlist(map.colors))
+
+paper_table_adult <- as.data.frame(read_excel("./RAW/Salva_SCs/salva_table_s1.xlsx"
+                                              , sheet = "JTK.epSCs.ADULT.p05"))
+paper_table_aged <- as.data.frame(read_excel("./RAW/Salva_SCs/salva_table_s1.xlsx"
+                                             , sheet = "JTK.epSC.AGED.p05"))
+```
+
+
+## Quality Check
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+data.only <- exprs[,-1]
+hist(as.matrix(data.only), breaks=50, xlab="Expression", main="Expression frequency")
+boxplot(data.only)
+```
+
+```{r creating_subsets, message=FALSE, warning=FALSE, include=FALSE}
+s2c_adult <- s2c[s2c$group=="Young",]
+adult <- exprs[,c("PROBE_ID", s2c_adult$sample)]
+s2c_aged <- s2c[s2c$group=="Aged",]
+aged <- exprs[,c("PROBE_ID", s2c_aged$sample)]
+```
+
+## NLS
+
+### Adult
+
+We use a 20:28 window for the period, as suggested by other papers as a "circadian" setting.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+if (!file.exists("./RESULTS/Salva/files/salva_nls_adult_results.csv")){
+  adult <- adult[,s2c_adult[order(s2c_adult$time),"sample"]]
+  adult$probeid <- rownames(adult)
+  adult <- adult %>% dplyr::select(ncol(adult), everything())
+  nls.results <- nls_regression(data=adult, s2c=s2c_adult, mode="port")
+  # write.csv(nls.results, "./RESULTS/Salva/files/salva_nls_adult_results.csv")
+}else{
+  nls.results <- read.csv("./RESULTS/Salva/files/salva_nls_adult_results.csv")
+}
+
+
+# Select genes with per <30; >20 and amp != 0
+nls.results.circa <- nls.results[which(nls.results$estimate.per >= 20 & 
+                                nls.results$estimate.per <= 28 & 
+                                (nls.results$BH.q.value.per < 0.05 |
+                                   is.na(nls.results$BH.q.value.per)) & 
+                                nls.results$r>=0.7 &
+                                nls.results$BH.q.value.amp < 0.05),]
+nls.results.circa.adult <- nls.results.circa
+# Add gene info and expression
+nls.results.circa.adult.annot <- merge(nls.results.circa.adult, affymetrix.data, by.x="feature", by.y="PROBE_ID")
+# write.csv(nls.results.circa.adult.annot, "./RESULTS/Salva/files/salva_nls_adult_results_annot.csv")
+```
+
+A total of `r nrow(nls.results.circa)` genes were classified as circadian, from the `r nrow(exprs)` tested genes. The test results of all the tested genes is in [salva_nls_adult_results_annot.csv]("./RESULTS/Salva/files/salva_nls_adult_results_annot.csv")
+
+
+```{r salva_nls_adult_circa_genes, echo=FALSE, message=FALSE, warning=FALSE}
+mat <- as.matrix(exprs[nls.results.circa.adult$feature, s2c_adult$sample])
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+
+t.colors <- data.frame(row.names = unique(s2c_adult$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                   )
+
+column.order.all <- s2c_adult[order(s2c_adult$time), "sample"]
+
+# Plot
+pheatmap(  mat[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+The list of those genes was sent for GO analysis:
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% nls.results.circa.adult$feature), "ENSEMBL"])
+go.data <- go.terms(gene.list)
+# write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+#            ,  "subgraph.number", "p.value", "query.size", "Genes"
+#            , "Precision")]
+# , "./RESULTS/Salva/files/salva_nls_adult_circa_GO_Terms.csv")
+```
+
+The list of GO Terms can be found in [salva_nls_adult_circa_GO_Terms.csv](./files/salva_nls_adult_circa_GO_Terms.csv)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = "First 20 GO results of the whole gene list detected with NLS for adult mice."
+                  , escape = TRUE, digits=60, row.names= FALSE))
+}else{
+  print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+              , caption = "GO results of the whole gene list detected with NLS for adult mice."
+              , escape = TRUE, digits=60, row.names= FALSE))
+  }
+```
+
+A k means clustering was then applied to the genes classified as circadian by NLS.
+
+```{r salva_nls_adult_circa_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- as.matrix(exprs[nls.results.circa$feature, s2c_adult$sample])
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data,
+                                     centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+A 4 group k-means was calculated for the adult mice circadian genes.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 4
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+datafr.circa.wt.clusters <- merge(nls.results.circa, clusters, by.x = 1, by.y=0)
+clusters <- data.frame(table(data.matrix$clusters.cluster))
+
+# Add expresion and gene names
+datafr.circa.wt.clusters <- merge(datafr.circa.wt.clusters, affymetrix.data, by.x="feature", by.y="PROBE_ID")
+# Export to file
+# write.csv(datafr.circa.wt.clusters, "./RESULTS/Salva/files/salva_nls_adult_circa_genes.csv", sep="", row.names = F)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with all the test info of those genes and the cluster each one is assigned to is in [salva_nls_adult_circa_genes.csv](./RESULTS/Salva/files/salva_nls_adult_circa_genes.csv)
+
+```{r salva_nls_adult_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE}
+kable(clusters, col.names = c("Cluster", "Number of genes"))
+```
+
+```{r salva_nls_adult_circa_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Young mice circadian genes expression clustered by k-means."}
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), kmeans=data.matrix$clusters.cluster)
+
+# Custom colors
+cluster.color <- brewer.pal(length(clusters$Var1), "Dark2")
+t.colors <- data.frame(row.names = unique(s2c_adult$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+c.colors <- data.frame(row.names = clusters$Var1
+                     , color = cluster.color
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                 , cluster = setNames(as.list(c.colors)$color, clusters$Var1)
+                   )
+
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               s2c_adult$sample]
+column.order.all <- s2c_adult[order(s2c_adult$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis. Three databases were consulted: Biological Process (BP), KEGG (kegg) and TF (tf). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:4){
+cluster.martid <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% cluster.martid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [salva_nls_adult_circa_kmeans_",i,"_GO_Terms.csv](files/salva_nls_adult_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # ,sprintf("./RESULTS/Salva/files/salva_nls_adult_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+### Aged
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+if (!file.exists("./RESULTS/Salva/files/salva_nls_aged_results.csv")){
+  aged <- aged[,s2c_aged[order(s2c_aged$time),"sample"]]
+  aged$probeid <- rownames(aged)
+  aged <- aged %>% dplyr::select(ncol(aged), everything())
+  nls.results <- nls_regression(data=aged, s2c=s2c_aged, mode="port")
+  # write.csv(nls.results, "./RESULTS/Salva/files/salva_nls_aged_results.csv")
+}else{
+  nls.results <- read.csv("./RESULTS/Salva/files/salva_nls_aged_results.csv")
+}
+
+# Select genes with per <30; >20 and amp != 0
+nls.results.circa <- nls.results[which(nls.results$estimate.per <= 28 & 
+                                nls.results$estimate.per >= 20 & 
+                                (nls.results$BH.q.value.per < 0.05 |
+                                   is.na(nls.results$BH.q.value.per)) & 
+                                nls.results$r>=0.7 &
+                                nls.results$BH.q.value.amp < 0.05),]
+nls.results.circa.aged <- nls.results.circa
+# Add gene info and expression
+nls.results.circa.aged.annot <- merge(nls.results.circa.aged, affymetrix.data, by.x="feature", by.y="PROBE_ID")
+# write.csv(nls.results.circa.aged.annot, "./RESULTS/Salva/files/salva_nls_aged_results_annot.csv")
+```
+
+A total of `r nrow(nls.results.circa)` genes were classified as circadian, from the `r nrow(exprs)` tested genes. The test results of all the tested genes is in [salva_nls_aged_results_annot.csv]("./RESULTS/Salva/files/salva_nls_aged_results_annot.csv")
+
+
+```{r salva_nls_aged_circa_genes, echo=FALSE, message=FALSE, warning=FALSE}
+mat <- as.matrix(exprs[nls.results.circa.aged$feature, s2c_aged$sample])
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+
+t.colors <- data.frame(row.names = unique(s2c_aged$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                   )
+
+column.order.all <- s2c_aged[order(s2c_aged$time), "sample"]
+
+# Plot
+pheatmap(  mat[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+
+The list of those genes was sent for GO analysis:
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% nls.results.circa.aged$feature), "ENSEMBL"])
+go.data <- go.terms(gene.list)
+# write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+#            ,  "subgraph.number", "p.value", "query.size", "Genes"
+#            , "Precision")]
+# , "./RESULTS/Salva/files/salva_nls_aged_circa_GO_Terms.csv")
+```
+
+The list of GO Terms can be found in [salva_nls_aged_circa_GO_Terms.csv](./files/salva_nls_aged_circa_GO_Terms.csv)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = "First 20 GO results of the whole gene list detected with NLS for aged mice."
+                  , escape = TRUE, digits=60, row.names= FALSE))
+}else{
+  print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+              , caption = "GO results of the whole gene list detected with NLS for aged mice."
+              , escape = TRUE, digits=60, row.names= FALSE))
+  }
+```
+
+
+A k means clustering was then applied to the genes classified as circadian by NLS.
+
+```{r salva_nls_aged_circa_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- as.matrix(exprs[nls.results.circa$feature, s2c_aged$sample])
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data,
+                                     centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+A 4 group k-means was calculated for the aged mice circadian genes.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 4
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+datafr.circa.wt.clusters <- merge(nls.results.circa, clusters, by.x = 1, by.y=0)
+clusters <- data.frame(table(data.matrix$clusters.cluster))
+
+# Add expresion and gene names
+datafr.circa.wt.clusters <- merge(datafr.circa.wt.clusters, affymetrix.data, by.x="feature", by.y="PROBE_ID")
+# Export to file
+# write.csv(datafr.circa.wt.clusters, "./RESULTS/Salva/files/salva_nls_aged_circa_genes.csv", sep="", row.names = F)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with all the test info of those genes and the cluster each one is assigned to is in [salva_nls_aged_circa_genes.csv](./RESULTS/Salva/files/salva_nls_aged_circa_genes.csv)
+
+```{r salva_nls_aged_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE}
+kable(clusters, col.names = c("Cluster", "Number of genes"))
+```
+
+```{r salva_nls_aged_circa_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="aged mice circadian genes expression clustered by k-means."}
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), kmeans=data.matrix$clusters.cluster)
+
+# Custom colors
+cluster.color <- brewer.pal(length(clusters$Var1), "Dark2")
+t.colors <- data.frame(row.names = unique(s2c_aged$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+c.colors <- data.frame(row.names = clusters$Var1
+                     , color = cluster.color
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                 , cluster = setNames(as.list(c.colors)$color, clusters$Var1)
+                   )
+
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               s2c_aged$sample]
+column.order.all <- s2c_aged[order(s2c_aged$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis. Three databases were consulted: Biological Process (BP), KEGG (kegg) and TF (tf). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:4){
+cluster.martid <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% cluster.martid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [salva_nls_aged_circa_kmeans_",i,"_GO_Terms.csv](files/salva_nls_aged_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # , sprintf("./RESULTS/Salva/files/salva_nls_aged_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+
+### Aged vs Adult 
+
+In our approach, a smaller number of genes were detected (using adjusted p-values instead of raw). Following is the same analysis performed for our genes (though always taking adjusted p.values, both in the gene discovery algorithm and in the GO terms).
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+adult_list <- as.character(nls.results.circa.adult$feature)
+aged_list <- as.character(nls.results.circa.aged$feature)
+```
+
+```{r salva_nls_aged_adult_venn, echo=FALSE, message=FALSE, warning=FALSE}
+intersection <- list(adult_list
+                     , aged_list
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              , col = c("blue", "red")
+              , fill = NA
+              , category.names = c("Adult","Aged")
+              , cat.pos = c(0,0)
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              , ext.text = FALSE
+              , main = "NLS detected genes"
+              , main.fontface = "bold"
+)
+
+grid.draw(venn)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Clean up after stupid venndiagram
+do.call(file.remove, list(list.files(path = "./RESULTS/plots/", pattern = "*.log", full.names = TRUE)))
+do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE)))
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Get expression
+adult_only_list <- adult_list[which(adult_list %!in% aged_list)]
+aged_only_list <- aged_list[which(aged_list %!in% adult_list)]
+both_list <- adult_list[which(adult_list %in% aged_list)]
+
+adult_only <- exprs[adult_only_list,-1]
+adult_only <- adult_only[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+adult_only_annot <- merge(adult_only, p2g.annot, by.x = 0, by.y = "PROBEID")
+# write.csv(adult_only_annot, "./RESULTS/Salva/files/salva_nls_adult_only_list.csv")
+aged_only <- exprs[aged_only_list, -1]
+aged_only <- aged_only[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+aged_only_annot <- merge(aged_only, p2g.annot, by.x = 0, by.y = "PROBEID")
+# write.csv(aged_only_annot, "./RESULTS/Salva/files/salva_nls_aged_only_list.csv")
+both <- exprs[both_list, -1]
+both <- both[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+both_annot <- merge(both, p2g.annot, by.x = 0, by.y = "PROBEID")
+# write.csv(both_annot, "./RESULTS/Salva/files/salva_nls_shared_list.csv")
+```
+
+The list of the genes in each sector of the diagram are:
+
+* Adult: [salva_nls_adult_only_list.csv]("./files/salva_nls_adult_only_list.csv")            
+
+* Aged: [salva_nls_aged_only_list.csv]("./files/salva_nls_aged_only_list.csv")        
+
+* Shared: [salva_nls_shared_only_list.csv]("./files/salva_nls_shared_only_list.csv") 
+
+#### Full list GO
+
+##### Adult 
+
+```{r salva_nls_adult_genes_only, echo=FALSE, message=FALSE, warning=FALSE, fig.cap = "Rhythmic genes detected with NLS only in adult mice.", fig.show='hold', fig.align='center'}
+# Plot expression
+col.annotation <- data.frame(row.names = s2c$sample, time = s2c$time)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))])
+pheatmap(  as.matrix(adult_only)
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = paste("NLS adult genes only")
+)
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+list <- unlist(strsplit(p2g.ensembl[which(p2g.ensembl$PROBEID %in% adult_only_list),"ENSEMBL"], ","))
+go.data.adult <- go.terms(list)
+go.data.adult <- go.data.adult[order(go.data.adult$p.value),]
+# write.csv(go.data.adult, "./RESULTS/Salva/files/nls_adult_only_GO_terms.csv")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+print(kable(go.data.adult[1:20, c("Term ID","Term Name", "Precision", "p.value")]
+                  , caption = sprintf("Adult only genes first 20 GO results.", i), escape = TRUE, digits=20, row.names= FALSE))
+```
+
+
+##### Aged
+
+```{r salva_nls_aged_genes_only, echo=FALSE, message=FALSE, warning=FALSE, fig.cap = "Rhythmic genes detected with NLS only in aged mice.", fig.show='hold', fig.align='center'}
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))])
+pheatmap(  as.matrix(aged_only)
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = paste("NLS aged genes only")
+)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+list <- unlist(strsplit(p2g.ensembl[which(p2g.ensembl$PROBEID %in% aged_only_list),"ENSEMBL"], ","))
+go.data.aged <- go.terms(list)
+go.data.aged <- go.data.aged[order(go.data.aged$p.value),]
+# write.csv(go.data.aged, "./RESULTS/Salva/files/nls_aged_only_GO_terms.csv")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+print(kable(go.data.aged[1:20, c("Term ID","Term Name", "Precision", "p.value")]
+                  , caption = sprintf("Aged only genes first 20 GO results.", i), escape = TRUE, digits=30, row.names= FALSE))
+```
+
+##### Shared 
+
+```{r salva_nls_shared_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.cap = "Shared rhythmic genes detected with NLS in adult and aged mice."}
+pheatmap(  as.matrix(both)
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = paste("NLS shared genes")
+)
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+list <- unlist(strsplit(p2g.ensembl[which(p2g.ensembl$PROBEID %in% both_list),"ENSEMBL"], ","))
+go.data.both <- go.terms(list)
+go.data.both <- go.data.both[order(go.data.both$p.value),]
+# write.csv(go.data.both, "./RESULTS/Salva/files/nls_shared_GO_terms.csv")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+print(kable(go.data.both[1:20, c("Term ID","Term Name", "Precision", "p.value")]
+                  , caption = sprintf("Shared genes first 20 GO results.", i), escape = TRUE, digits=40, row.names= FALSE))
+```
+
+#### Clustered lists GO
+
+After that, the lists were clustered by k means and each separate cluster analyzed with GO.
+
+##### Adult        
+
+```{r salva_nls_adult_only_circa_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- as.matrix(adult_only[,s2c_adult$sample])
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data,
+                                     centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+A 4 group k-means was calculated for the adult mice circadian genes.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 4
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+adult.only.clusters <- merge(adult_only[,s2c_adult$sample], clusters, by.x = 0, by.y=0)
+clusters <- data.frame(table(data.matrix$clusters.cluster))
+
+# Add expresion and gene names
+adult.only.clusters <- merge(adult.only.clusters, affymetrix.data[,c("PROBE_ID", "DESCRIPTION", "SYMBOL")]
+                             , by.x=1, by.y="PROBE_ID")
+# Export to file
+# write.csv(adult.only.clusters, "./RESULTS/Salva/files/salva_nls_adult_only_circa_genes.csv", sep="", row.names = F)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with the info of those genes and the cluster each one is assigned to is in [salva_nls_adult_only_circa_genes.csv](./RESULTS/Salva/files/salva_nls_adult_only_circa_genes.csv)
+
+```{r salva_nls_adult_only_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE}
+kable(clusters, col.names = c("Cluster", "Number of genes"))
+```
+
+```{r salva_nls_adult_only_circa_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Adult only circadian genes expression clustered by k-means."}
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), kmeans=data.matrix$clusters.cluster)
+
+# Custom colors
+cluster.color <- brewer.pal(length(clusters$Var1), "Dark2")
+t.colors <- data.frame(row.names = unique(s2c_adult$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+c.colors <- data.frame(row.names = clusters$Var1
+                     , color = cluster.color
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                 , cluster = setNames(as.list(c.colors)$color, clusters$Var1)
+                   )
+
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               s2c_adult$sample]
+column.order.all <- s2c_adult[order(s2c_adult$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis (Biological Process (BP)). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:4){
+cluster.martid <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% cluster.martid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [salva_nls_adult_only_circa_kmeans_",i,"_GO_Terms.csv](files/salva_nls_adult_only_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # , sprintf("./RESULTS/Salva/files/salva_nls_adult_only_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+
+##### Aged       
+
+```{r salva_nls_aged_only_circa_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- as.matrix(aged_only[,s2c_aged$sample])
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data,
+                                     centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+A 4 group k-means was calculated for the aged mice circadian genes.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 4
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+aged.only.clusters <- merge(aged_only[,s2c_aged$sample], clusters, by.x = 0, by.y=0)
+clusters <- data.frame(table(data.matrix$clusters.cluster))
+
+# Add expresion and gene names
+aged.only.clusters <- merge(aged.only.clusters, affymetrix.data[,c("PROBE_ID", "DESCRIPTION", "SYMBOL")]
+                             , by.x=1, by.y="PROBE_ID")
+# Export to file
+# write.csv(aged.only.clusters, "./RESULTS/Salva/files/salva_nls_aged_only_circa_genes.csv", sep="", row.names = F)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with the info of those genes and the cluster each one is assigned to is in [salva_nls_aged_only_circa_genes.csv](./RESULTS/Salva/files/salva_nls_aged_only_circa_genes.csv)
+
+```{r salva_nls_aged_only_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE}
+kable(clusters, col.names = c("Cluster", "Number of genes"))
+```
+
+```{r salva_nls_aged_only_circa_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Aged only circadian genes expression clustered by k-means."}
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), kmeans=data.matrix$clusters.cluster)
+
+# Custom colors
+cluster.color <- brewer.pal(length(clusters$Var1), "Dark2")
+t.colors <- data.frame(row.names = unique(s2c_aged$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+c.colors <- data.frame(row.names = clusters$Var1
+                     , color = cluster.color
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                 , cluster = setNames(as.list(c.colors)$color, clusters$Var1)
+                   )
+
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               s2c_aged$sample]
+column.order.all <- s2c_aged[order(s2c_aged$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis (Biological Process (BP)). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:4){
+cluster.martid <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% cluster.martid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [salva_nls_aged_only_circa_kmeans_",i,"_GO_Terms.csv](files/salva_nls_aged_only_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # , sprintf("./RESULTS/Salva/files/salva_nls_aged_only_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+## JTK (JTK3)
+
+The period is set to 20:28 window as in NLS.
+
+### Adult
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+if (!file.exists("./RESULTS/Salva/files/salva_jtk3_adult_result_20_28.csv")){
+  data <- adult[,-1]
+  # data <- sapply(data, as.numeric)
+  # rownames(data) <- adult$PROBE_ID
+  data <- data[,s2c_adult[order(s2c_adult$time),"sample"]]
+  
+  annot <- data.frame(Probeset=rownames(data))
+  timepoints <- length(unique(s2c_adult$time))
+  nrep <- length(unique(s2c_adult$ind))
+  lag <- unique(diff(as.numeric(unique(s2c_adult[order(s2c_adult$time),"time"]))))
+  
+  jtkdist(timepoints, nrep) # 6 total time points, 4 replicates per time point
+  
+  # periods <- 6:6 # Katia's setting
+  periods <- 5:7 # 20:28 
+  # periods <- round(20/lag):round(28/lag) # number of time points per cycle.
+  jtk.init(periods, lag)  # 4 is the number of hours between time points
+
+  res <- apply(data,1,function(z) {
+    jtkx(z)
+    c(JTK.ADJP,JTK.PERIOD,JTK.LAG,JTK.AMP)
+  })
+  res <- as.data.frame(t(res))
+  bhq <- p.adjust(unlist(res[,1]),"BH")
+  res <- cbind(bhq,res)
+  colnames(res) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
+  results.jtk <- cbind(annot,res,data)
+  results.jtk <- results.jtk[order(res$ADJ.P,-res$AMP),]
+
+  # write.csv(results.jtk, "./RESULTS/Salva/files/salva_jtk3_adult_result_20_28.csv")
+}else{
+  results.jtk <- read.csv("./RESULTS/Salva/files/salva_jtk3_adult_result_20_28.csv", row.names = 1)
+}
+
+# Select genes with adj p value < 0.05
+jtk.results.q <- results.jtk[which(results.jtk$BH.Q < 0.05 ),]
+jtk.results.p <- results.jtk[which(results.jtk$ADJ.P < 0.05 ),]
+jtk.results.p.adult <- jtk.results.p
+jtk.results.q.adult <- jtk.results.q
+```
+
+A total of `r nrow(jtk.results.q.adult)` genes were found using an adjusted p. value and a total of `r nrow(jtk.results.p.adult)` genes were found using the raw p. values.
+
+
+```{r salva_adult_jtk_jtk3_qval, echo=FALSE, fig.cap="JTK circadian genes at BH<0.05.", eval=nrow(jtk.results.q.adult)>0 , message=FALSE, warning=FALSE}
+data <- adult[jtk.results.q.adult$Probeset,-1]
+data <- data[,s2c_adult[order(s2c_adult$time),"sample"]]
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                   )
+# Plot the heatmap
+pheatmap(  as.matrix(data)
+           , scale = "row"
+           , color = hmcol
+           , cellwidth = 5
+           , fontsize_col = 5
+           , border_color = NA
+           , clustering_distance_cols = "correlation" #(Pearson)
+           , clustering_distance_rows = "correlation" #(Pearson)
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 15
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+          )
+```
+
+```{r salva_adult_jtk_jtk3_pval, echo=FALSE, fig.cap="JTK circadian genes at p.value<0.05.", eval=nrow(jtk.results.p.adult)>0 , message=FALSE, warning=FALSE}
+data <- adult[jtk.results.p.adult$Probeset,-1]
+data <- data[,s2c_adult[order(s2c_adult$time),"sample"]]
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                   )
+# Plot the heatmap
+pheatmap(  as.matrix(data)
+           , scale = "row"
+           , color = hmcol
+           , cellwidth = 5
+           , fontsize_col = 5
+           , border_color = NA
+           , clustering_distance_cols = "correlation" #(Pearson)
+           , clustering_distance_rows = "correlation" #(Pearson)
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 15
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+          )
+```
+
+
+### Aged
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+if (!file.exists("./RESULTS/Salva/files/salva_jtk3_aged_result_20_28.csv")){
+  data <- aged[,-1]
+  annot <- data.frame(Probeset=rownames(data))
+  timepoints <- length(unique(s2c_aged$time))
+  nrep <- length(unique(s2c_aged$ind))
+  lag <- unique(diff(as.numeric(unique(s2c_aged[order(s2c_aged$time),"time"]))))
+  
+  jtkdist(timepoints, nrep) # 6 total time points, 4 replicates per time point
+  
+  # periods <- 6:6 # Katia's setting
+  periods <- 5:7 # 20:28
+  # periods <- round(20/lag):round(28/lag) # number of time points per cycle. 
+  jtk.init(periods, lag)  # 4 is the number of hours between time points
+
+  res <- apply(data,1,function(z) {
+    jtkx(z)
+    c(JTK.ADJP,JTK.PERIOD,JTK.LAG,JTK.AMP)
+  })
+  res <- as.data.frame(t(res))
+  bhq <- p.adjust(unlist(res[,1]),"BH")
+  res <- cbind(bhq,res)
+  colnames(res) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
+  results.jtk <- cbind(annot,res,data)
+  results.jtk <<- results.jtk[order(res$ADJ.P,-res$AMP),]
+  # write.csv(results.jtk, "./RESULTS/Salva/files/salva_jtk3_aged_result_20_28.csv")
+}else{
+  results.jtk <- read.csv("./RESULTS/Salva/files/salva_jtk3_aged_result_20_28.csv", row.names = 1)
+}
+
+# Select genes with adj p value < 0.05
+jtk.results.q <- results.jtk[which(results.jtk$BH.Q < 0.05 ),]
+jtk.results.p <- results.jtk[which(results.jtk$ADJ.P < 0.05 ),]
+jtk.results.p.aged <- jtk.results.p
+jtk.results.q.aged <- jtk.results.q
+```
+
+A total of `r nrow(jtk.results.q.aged)` genes were found using an adjusted p. value and a total of `r nrow(jtk.results.p.aged)` genes were found using the raw p. values.
+
+
+```{r salva_aged_jtk_jtk3_qval, echo=FALSE, fig.cap="JTK circadian genes at BH<0.05.", eval=nrow(jtk.results.q.aged)>0 , message=FALSE, warning=FALSE}
+data <- aged[jtk.results.q.aged$Probeset,-1]
+data <- data[,s2c_aged[order(s2c_aged$time),"sample"]]
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                   )
+# Plot the heatmap
+pheatmap(  as.matrix(data)
+           , scale = "row"
+           , color = hmcol
+           , cellwidth = 5
+           , fontsize_col = 5
+           , border_color = NA
+           , clustering_distance_cols = "correlation" #(Pearson)
+           , clustering_distance_rows = "correlation" #(Pearson)
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 15
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+          )
+```
+
+```{r salva_aged_jtk_jtk3_pval, echo=FALSE, fig.cap="JTK circadian genes at p.value<0.05.", eval=nrow(jtk.results.p.aged)>0 , message=FALSE, warning=FALSE}
+data <- aged[jtk.results.p.aged$Probeset,-1]
+data <- data[,s2c_aged[order(s2c_aged$time),"sample"]]
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                   )
+# Plot the heatmap
+pheatmap(  as.matrix(data)
+           , scale = "row"
+           , color = hmcol
+           , cellwidth = 5
+           , fontsize_col = 5
+           , border_color = NA
+           , clustering_distance_cols = "correlation" #(Pearson)
+           , clustering_distance_rows = "correlation" #(Pearson)
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 15
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+          )
+```
+
+
+## Paper
+
+### Adult
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+paper_adult_list <- paper_table_adult$GENE
+paper_adult_probe_list <- p2g.annot[which(p2g.annot$SYMBOL %in% paper_adult_list),]
+paper_adult_expression <- exprs[which(exprs$PROBE_ID %in% paper_adult_probe_list$PROBEID),]
+```
+
+```{r salva_paper_adult_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Genes reported in the paper from adult epSCs. Gene symbols are matched to all the possible probe IDs."}
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+# Row annotation
+t.colors <- data.frame(row.names = unique(s2c_adult$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                   )
+
+column.order.all <- s2c_adult[order(s2c_adult$time), "sample"]
+
+# Plot
+pheatmap(  as.matrix(paper_adult_expression[,column.order.all])
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         # , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         # , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+### Aged
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+paper_aged_list <- paper_table_aged$GENE
+paper_aged_probe_list <- p2g.annot[which(p2g.annot$SYMBOL %in% paper_aged_list),]
+paper_aged_expression <- exprs[which(exprs$PROBE_ID %in% paper_aged_probe_list$PROBEID),]
+```
+
+```{r salva_paper_aged_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Genes reported in the paper from aged epSCs. Gene symbols are matched to all the possible probe IDs."}
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+# Row annotation
+t.colors <- data.frame(row.names = unique(s2c_aged$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                   )
+
+column.order.all <- s2c_aged[order(s2c_aged$time), "sample"]
+
+# Plot
+pheatmap(  as.matrix(paper_aged_expression[,column.order.all])
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         # , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         # , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+## Algorithms overlap
+
+### Young
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+nls <- nls.results.circa.adult$feature
+# m3d.p <- meta3d.adult.p$CycID
+# m3d.q <- meta3d.adult.q$CycID
+# m2d.p <- meta2d.adult.p$CycID
+# m2d.q <- meta2d.adult.q$CycID
+jtk3.p <- jtk.results.p.adult$Probeset
+jtk3.q <- jtk.results.q.adult$Probeset
+```
+
+```{r salva_jtk_adult_overlap_venn, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="All 3JTK methods compared at p.val <0.05."}
+intersection <- list(nls
+                     , jtk3.q
+                     , jtk3.p
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              , col = c("blue", "red", "green")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("nls","jtk3q", "jtk3")
+              , cat.pos = c(0,0,0)
+              , cat.fontface = "bold"
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "Adult genes detected with each method"
+              , main.fontface = "bold"
+              
+)
+
+grid.draw(venn)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Clean up after stupid venndiagram
+do.call(file.remove, list(list.files(path = "./RESULTS/plots/", pattern = "*.log", full.names = TRUE)))
+do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE)))
+```
+
+
+### Aged
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+nls <- nls.results.circa.aged$feature
+# m3d.p <- meta3d.aged.p$CycID
+# m3d.q <- meta3d.aged.q$CycID
+# m2d.p <- meta2d.aged.p$CycID
+# m2d.q <- meta2d.aged.q$CycID
+jtk3.p <- jtk.results.p.aged$Probeset
+jtk3.q <- jtk.results.q.aged$Probeset
+```
+
+```{r salva_jtk_aged_overlap_venn, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="All 3 JTK methods compared at p.val <0.05."}
+intersection <- list(nls
+                     , jtk3.p
+                     , jtk3.q
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              , col = c("blue", "red", "green")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("nls","jtk3.p", "jtk3.q")
+              , cat.pos = c(0,0,6)
+              , cat.fontface = "bold"
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "Aged genes detected with each method"
+              , main.fontface = "bold"
+)
+
+grid.draw(venn)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Clean up after stupid venndiagram
+do.call(file.remove, list(list.files(path = "./RESULTS/plots/", pattern = "*.log", full.names = TRUE)))
+do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE)))
+```
+
+
+
+## JTK3 vs. NLS
+
+### JTK
+
+#### Paper results
+
+In their paper, they find a total of 3144 rhythmic genes in adult and 2309 rhythmic genes in aged mouse epSCs. Of those, 749 are shared between the two.
+
+![VennDiagram](../DOC/Salva/salva_ngenes.png)
+
+With those, they identify the following GO terms:
+
+![GOTerms](../DOC/Salva/salva_go_terms.png)
+
+
+#### Our results
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+adult_list_jtk <- as.character(jtk.results.p.adult$Probeset)
+aged_list_jtk <- as.character(jtk.results.p.aged$Probeset)
+
+# Get expression
+adult_only_jtk <- exprs[adult_list_jtk[which(adult_list_jtk %!in% aged_list_jtk)]
+                             , s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+aged_only_jtk <- exprs[aged_list_jtk[which(aged_list_jtk %!in% adult_list_jtk)]
+                           , s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+both_jtk <- exprs[adult_list_jtk[which(adult_list_jtk %in% aged_list_jtk)]
+                       , s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+
+# adult_only <- exprs[adult_only_list,-1]
+# adult_only <- adult_only[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+# aged_only <- exprs[aged_only_list, -1]
+# aged_only <- aged_only[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+# both <- exprs[both_list, -1]
+# both <- both[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+```
+
+```{r salva_jtk3_aged_adult_venn, echo=FALSE, message=FALSE, warning=FALSE}
+intersection <- list(adult_list_jtk
+                     , aged_list_jtk
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              , col = c("blue", "red")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("Adult","Aged")
+              , cat.pos = c(0,0)
+              , cat.fontface = "bold"
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "Local JTK detected genes"
+              , main.fontface = "bold"
+)
+
+grid.draw(venn)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Clean up after stupid venndiagram
+do.call(file.remove, list(list.files(path = "./RESULTS/plots/", pattern = "*.log", full.names = TRUE)))
+do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE)))
+```
+
+
+When we run JTK on their samples with their config we get a total of `r nrow(jtk.results.p.adult)` genes in adult mice, 
+`r nrow(jtk.results.p.aged)` in aged mice and `r nrow(both_jtk)` shared circadian genes.
+
+
+```{r salva_jtk3_aged_adult_genes_only, echo=FALSE, message=FALSE, warning=FALSE, fig.show='hold', fig.cap="Rhythmic genes only in adult or aged mice, respectively. (local JTK)", fig.align='center'}
+col.annotation <- data.frame(row.names = s2c$sample, time = s2c$time)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                   )
+
+# Plot expression
+pheatmap(  as.matrix(adult_only_jtk)
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = "Local JTK adult genes only"
+)
+
+
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))])
+pheatmap(  as.matrix(aged_only_jtk)
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = "Local JTK aged genes only"
+)
+```
+
+
+```{r salva_jtk3_shared_genes, echo=FALSE, message=FALSE, warning=FALSE}
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                   )
+pheatmap(  as.matrix(both_jtk)
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , legend = TRUE
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = paste("Local JTK shared genes")
+)
+```
+
+The 3 lists were submitted for GO analysis, without discriminating by acrophase.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+adult_only_jtk_list <- adult_list_jtk[which(adult_list_jtk %!in% aged_list_jtk)]
+list <- unlist(strsplit(p2g.ensembl[which(p2g.ensembl$PROBEID %in% adult_only_jtk_list),"ENSEMBL"], ","))
+go.data.adult.jtk <- go.terms(list)
+go.data.adult.jtk <- go.data.adult.jtk[order(go.data.adult.jtk$p.value),]
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+print(kable(go.data.adult.jtk[1:20, c("Term ID","Term Name", "Precision", "p.value")]
+                  , caption = sprintf("Adult genes only first 20 GO results.", i), escape = TRUE, digits=20, row.names= FALSE))
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+aged_only_jtk_list <- aged_list_jtk[which(aged_list_jtk %!in% adult_list_jtk)]
+list <- unlist(strsplit(p2g.ensembl[which(p2g.ensembl$PROBEID %in% aged_only_jtk_list),"ENSEMBL"], ","))
+go.data.aged.jtk <- go.terms(list)
+go.data.aged.jtk <- go.data.aged.jtk[order(go.data.aged.jtk$p.value),]
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE, results='asis'}
+print(kable(go.data.aged.jtk[1:20, c("Term ID","Term Name", "Precision", "p.value")]
+                  , caption = sprintf("Aged genes only first 20 GO results.", i), escape = TRUE, digits=20, row.names= FALSE))
+```
+
+## Paper vs. JTK3
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+local_adult_list <- unlist(strsplit(p2g.annot[which(p2g.annot$PROBEID %in% adult_list_jtk), "SYMBOL"], ","))
+local_adult_list <- local_adult_list[which(local_adult_list != "NA")]
+adult_intersection <- list(local_adult_list
+                     , paper_table_adult$GENE
+                    )
+
+
+local_aged_list <- unlist(strsplit(p2g.annot[which(p2g.annot$PROBEID %in% aged_list_jtk), "SYMBOL"], ","))
+local_aged_list <- local_aged_list[which(local_aged_list != "NA")]
+aged_intersection <- list(local_aged_list
+                     , paper_table_aged$GENE
+                    )
+```
+
+```{r salva_paper_local_jtk3_adult_venn, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Adult genes overlap between paper reported genes and local run."}
+# intersection <- list(adult_list_jtk
+#                      , aged_list_jtk
+#                     )
+venn <- venn.diagram( adult_intersection
+              , filename = NULL
+              , scale = F
+              , col = c("green", "brown")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("Local","Paper")
+              , cat.pos = c(0,0)
+              # , cat.fontface = "bold"
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "Adult genes overlap between local JTK and paper"
+              , main.fontface = "bold"
+)
+
+grid.draw(venn)
+```
+
+
+```{r salva_paper_local_jtk3_aged_venn, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Aged genes overlap between paper reported genes and local run."}
+# intersection <- list(adult_list_jtk
+#                      , aged_list_jtk
+#                     )
+venn <- venn.diagram( aged_intersection
+              , filename = NULL
+              , scale = F
+              , col = c("green", "brown")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("Local","Paper")
+              , cat.pos = c(0,0)
+              , cat.fontface = "bold"
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "Aged genes overlap between local JTK and paper"
+              , main.fontface = "bold"
+)
+
+grid.draw(venn)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Clean up after stupid venndiagram
+do.call(file.remove, list(list.files(path = "./RESULTS/plots/", pattern = "*.log", full.names = TRUE)))
+do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE)))
+```
+
+
+## NLS vs Paper
+
+This is a comparison of the genes reported in the paper and the ones we detect using NLS.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Get gene symbols, where there is no symbol, replace by probeid and unique the final vector 
+# (two probes can have the same symbol)
+# Get probenames
+nls_adult_list <- as.character(nls.results.circa.adult$feature)
+# Get gene symbol
+nls_adult_symbol_list <- p2g[which(p2g$PROBEID %in% nls_adult_list),]
+# When there is no symbol, change for probeid
+nls_adult_symbol_list[is.na(nls_adult_symbol_list$SYMBOL),] <- as.character(nls_adult_symbol_list$PROBEID[is.na(nls_adult_symbol_list$SYMBOL)])
+# If there was more than one probe for symbol we merge them
+nls_adult_list <- unique(nls_adult_symbol_list$SYMBOL)
+
+nls_aged_list <- as.character(nls.results.circa.aged$feature)
+nls_aged_symbol_list <- p2g[which(p2g$PROBEID %in% nls_aged_list),]
+nls_aged_symbol_list[is.na(nls_aged_symbol_list$SYMBOL),] <- as.character(nls_aged_symbol_list$PROBEID[is.na(nls_aged_symbol_list$SYMBOL)])
+nls_aged_list <- unique(nls_aged_symbol_list$SYMBOL)
+
+# Paper results symbol
+paper_adult_list <- paper_table_adult$GENE
+paper_aged_list <- paper_table_aged$GENE
+```
+
+##### Adult
+
+```{r salva_nls_paper_adult_overlap_venn, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="NLS and paper adult genes overlap."}
+intersection <- list(nls_adult_list
+                   , paper_adult_list
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              , col = c("blue", "red")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("NLS","paper")
+              , cat.pos = c(0,0)
+              # , cat.fontface = "bold"
+              , force.unique = T
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "NLS and paper adult genes"
+              , main.fontface = "bold"
+)
+
+grid.draw(venn)
+```
+
+Following is the heatmap of the adult genes detected by NLS and not detected in the paper.
+
+```{r salva_nls_only_adult, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Heatmap of the gene detected with NLS but not JTK."}
+# From the symbol unique list, which are not in the paper (all probes with no gene symbol are there)
+nls_only_adult <- nls_adult_list[which(nls_adult_list %!in% paper_adult_list)]
+# Get the probeid of the nls only gene symbols, from the table we prepared above
+# that has nameless genes designed as probeids (if one symbol has more than one name all are recovered)
+nls_only_adult_probeid <- nls_adult_symbol_list[which(nls_adult_symbol_list$SYMBOL %in% nls_only_adult), "PROBEID"]
+# Get the expression of the genes
+data.matrix <- exprs[which(exprs$PROBE_ID %in% nls_only_adult_probeid), s2c[which(s2c$group == "Young"), "sample"]]
+
+# Config heatmap colors
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                   )
+# Plot
+pheatmap(  as.matrix(data.matrix)
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         # , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+         , main = "Adult genes detected with NLS but not paper"
+)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Export data
+nls_only_adult_list <- nls_adult_symbol_list[which(nls_adult_symbol_list$SYMBOL %in% nls_only_adult),]
+# write.csv(nls_only_adult_list, "./RESULTS/Salva/files/nls_only_adult_gene_list.csv")
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% nls_only_adult_probeid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+go.data <- go.data[order(go.data$p.value),]
+# write.csv(go.data, "./RESULTS/Salva/files/nls_only_adult_GO_Terms.csv")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("NLS only adult genes first 20 GO results.", i)
+            , escape = TRUE, digits=60, row.names= FALSE))
+```
+
+
+A k means clustering was then applied to the genes classified as circadian only by NLS.
+
+```{r salva_nls__only_adult_circa_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- data.matrix
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data,
+                                     centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+A 2 group k-means was calculated for the adult mice circadian genes.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 2
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+datafr.circa.wt.clusters <- merge(nls.results.circa, clusters, by.x = 1, by.y=0)
+clusters <- data.frame(table(data.matrix$clusters.cluster))
+
+# Add expresion and gene names
+datafr.circa.wt.clusters <- merge(datafr.circa.wt.clusters, affymetrix.data, by.x="feature", by.y="PROBE_ID")
+# Export to file
+# write.csv(datafr.circa.wt.clusters, "./RESULTS/Salva/files/salva_nls_only_adult_circa_genes.csv", sep="", row.names = F)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with all the test info of those genes and the cluster each one is assigned to is in [salva_nls_only_adult_circa_genes.csv](./RESULTS/Salva/files/salva_nls_only_adult_circa_genes.csv)
+
+```{r salva_nls_only_adult_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE, results='asis'}
+kable(clusters, col.names = c("Cluster", "Number of genes"))
+```
+
+```{r salva_nls_only_adult_circa_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Adult mice circadian genes classified ONLY by NSL. (clustered by k-means)."}
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), kmeans=data.matrix$clusters.cluster)
+
+# Custom colors
+cluster.color <- brewer.pal(length(clusters$Var1), "Dark2")
+t.colors <- data.frame(row.names = unique(s2c_adult$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+c.colors <- data.frame(row.names = clusters$Var1
+                     , color = cluster.color[1:2]
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                 , cluster = setNames(as.list(c.colors)$color, clusters$Var1)
+                   )
+
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               s2c_adult$sample]
+column.order.all <- s2c_adult[order(s2c_adult$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+         , main = "Adult genes detected with NLS but not paper"
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis. Three databases were consulted: Biological Process (BP), KEGG (kegg) and TF (tf). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:groups){
+cluster.martid <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% cluster.martid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [salva_nls_only_adult_circa_kmeans_",i,"_GO_Terms.csv](files/salva_nls_only_adult_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # ,sprintf("./RESULTS/Salva/files/salva_nls_only_adult_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+
+And the genes reported by the paper but not NLS. All the probesIDs matching any of the symbols is shown in the heatmap.
+
+```{r salva_paper_only_adult , echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Heatmap of the gene detected with NLS but not JTK."}
+# No repeat p2g
+# p2g.no.repeat <- p2g[!duplicated(p2g$SYMBOL),]
+# Get gene symbols
+paper_only_adult <- paper_adult_list[which(paper_adult_list %!in% nls_adult_list)]
+# Get gene probeids
+paper_only_adult_probeid <- p2g[which(p2g$SYMBOL %in% paper_only_adult), "PROBEID"]
+data.matrix <- exprs[which(exprs$PROBE_ID %in% paper_only_adult_probeid), s2c[which(s2c$group == "Young"), "sample"]]
+# Plot
+pheatmap(  as.matrix(data.matrix)
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 0
+         , annotation_col = col.annotation
+         # , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         # , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+         , main = "Adult genes detected in the paper but not NLS"
+)
+```
+
+The final heatmap has `r nrow(data.matrix)` due to the not unique key-value of gene symbols and probeids. All the probeids corresponding to the reported gene symbols are shown.
+
+
+A k means clustering was then applied to the genes classified as circadian only by JTK.
+
+```{r salva_jtk_only_adult_circa_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- data.matrix
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data,
+                                     centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+A 2 group k-means was calculated for the adult mice circadian genes.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 2
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+datafr.circa.wt.clusters <- merge(nls.results.circa, clusters, by.x = 1, by.y=0)
+clusters <- data.frame(table(data.matrix$clusters.cluster))
+
+# Add expresion and gene names
+datafr.circa.wt.clusters <- merge(datafr.circa.wt.clusters, affymetrix.data, by.x="feature", by.y="PROBE_ID")
+# Export to file
+# write.csv(datafr.circa.wt.clusters, "./RESULTS/Salva/files/salva_jtk_only_adult_circa_genes.csv", sep="", row.names = F)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with all the test info of those genes and the cluster each one is assigned to is in [salva_jtk_only_adult_circa_genes.csv](./RESULTS/Salva/files/salva_jtk_only_adult_circa_genes.csv)
+
+```{r salva_jtk_only_adult_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE, results='asis'}
+kable(clusters, col.names = c("Cluster", "Number of genes"))
+```
+
+```{r salva_jtk_only_adult_circa_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Adult mice circadian genes classified ONLY by JTK. (clustered by k-means)."}
+col.annotation <- data.frame(row.names = s2c_adult$sample, time = s2c_adult$time)
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), kmeans=data.matrix$clusters.cluster)
+
+# Custom colors
+cluster.color <- brewer.pal(length(clusters$Var1), "Dark2")
+t.colors <- data.frame(row.names = unique(s2c_adult$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+c.colors <- data.frame(row.names = clusters$Var1
+                     , color = cluster.color[1:2]
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))]
+                 , cluster = setNames(as.list(c.colors)$color, clusters$Var1)
+                   )
+
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               s2c_adult$sample]
+column.order.all <- s2c_adult[order(s2c_adult$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+         , main = "Adult genes detected with JTK but not paper"
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis. Three databases were consulted: Biological Process (BP), KEGG (kegg) and TF (tf). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:groups){
+cluster.martid <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% cluster.martid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [salva_jtk_only_adult_circa_kmeans_",i,"_GO_Terms.csv](files/salva_jtk_only_adult_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # ,sprintf("./RESULTS/Salva/files/salva_jtk_only_adult_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+
+##### Aged
+
+```{r salva_nls_paper_aged_overlap_venn, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="NLS and paper aged genes overlap."}
+intersection <- list(nls_aged_list
+                     , paper_aged_list
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              , col = c("blue", "red")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("NLS","paper")
+              , cat.pos = c(0,0)
+              , cat.fontface = "bold"
+              , force.unique = T
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "NLS and paper aged genes"
+              , main.fontface = "bold"
+)
+
+grid.draw(venn)
+```
+
+Following is the heatmap of the aged genes detected by NLS and not detected in the paper.
+
+```{r salva_nls_only_aged, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Heatmap of the aged genes detected with NLS but not JTK."}
+nls_only_aged <- nls_aged_list[which(nls_aged_list %!in% paper_aged_list)]
+# write.csv(nls_only_aged, "./RESULTS/Salva/files/nls_only_aged_gene_list.csv")
+nls_only_aged_probeid <- nls_aged_symbol_list[which(nls_aged_symbol_list$SYMBOL %in% nls_only_aged), "PROBEID"]
+data.matrix <- exprs[which(exprs$PROBE_ID %in% nls_only_aged_probeid), s2c[which(s2c$group == "Aged"), "sample"]]
+
+# Config heatmap colors
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                   )
+# Plot
+pheatmap(  as.matrix(data.matrix) 
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 0
+         , annotation_col = col.annotation
+         # , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         # , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+         # , main = "Aged genes detected with NLS but not paper"
+)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Export data
+nls_only_aged_list <- nls_aged_symbol_list[which(nls_aged_symbol_list$SYMBOL %in% nls_only_aged),]
+# write.csv(nls_only_aged_list, "./RESULTS/Salva/files/nls_only_aged_gene_list.csv")
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% nls_only_aged_probeid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+go.data <- go.data[order(go.data$p.value),]
+# write.csv(go.data, "./RESULTS/Salva/files/nls_only_aged_GO_Terms.csv")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("NLS only aged genes first 20 GO results.", i)
+            , escape = TRUE, digits=60, row.names= FALSE))
+```
+
+A k means clustering was then applied to the genes classified as circadian only by NLS.
+
+```{r salva_nls__only_aged_circa_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- data.matrix
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data,
+                                     centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+A 3 group k-means was calculated for the aged mice circadian genes.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 3
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+datafr.circa.wt.clusters <- merge(nls.results.circa, clusters, by.x = 1, by.y=0)
+clusters <- data.frame(table(data.matrix$clusters.cluster))
+
+# Add expresion and gene names
+datafr.circa.wt.clusters <- merge(datafr.circa.wt.clusters, affymetrix.data, by.x="feature", by.y="PROBE_ID")
+# Export to file
+# write.csv(datafr.circa.wt.clusters, "./RESULTS/Salva/files/salva_nls_only_aged_circa_genes.csv", sep="", row.names = F)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with all the test info of those genes and the cluster each one is assigned to is in [salva_nls_only_aged_circa_genes.csv](./RESULTS/Salva/files/salva_nls_only_aged_circa_genes.csv)
+
+```{r salva_nls_only_aged_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE, results='asis'}
+kable(clusters, col.names = c("Cluster", "Number of genes"))
+```
+
+```{r salva_nls_only_aged_circa_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Aged mice circadian genes classified ONLY by NLS. (Clustered by k-means)."}
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), kmeans=data.matrix$clusters.cluster)
+
+# Custom colors
+cluster.color <- brewer.pal(length(clusters$Var1), "Dark2")
+t.colors <- data.frame(row.names = unique(s2c_aged$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+c.colors <- data.frame(row.names = clusters$Var1
+                     , color = cluster.color
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                 , cluster = setNames(as.list(c.colors)$color, clusters$Var1)
+                   )
+
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               s2c_aged$sample]
+column.order.all <- s2c_aged[order(s2c_aged$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+         , main = "Adult genes detected with NLS but not paper"
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis. Three databases were consulted: Biological Process (BP), KEGG (kegg) and TF (tf). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:groups){
+cluster.martid <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% cluster.martid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [salva_nls_only_aged_circa_kmeans_",i,"_GO_Terms.csv](files/salva_nls_only_aged_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # ,sprintf("./RESULTS/Salva/files/salva_nls_only_aged_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+
+And the genes reported in the paper but not NLS. 
+
+```{r salva_paper_only_aged , echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Heatmap of the aged genes reported in paper but not NLS"}
+# No repeat p2g
+# p2g.no.repeat <- p2g[!duplicated(p2g$SYMBOL),]
+# Get gene symbols
+paper_only_aged <- paper_aged_list[which(paper_aged_list %!in% nls_aged_list)]
+# Get gene probeids
+paper_only_aged_probeid <- p2g[which(p2g$SYMBOL %in% paper_only_aged), "PROBEID"]
+data.matrix <- exprs[which(exprs$PROBE_ID %in% paper_only_aged_probeid), s2c[which(s2c$group == "Aged"), "sample"]]
+# Plot
+pheatmap(  as.matrix(data.matrix)
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         # , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         # , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+         # , main = "Aged genes detected in the paper but not NLS"
+)
+```
+
+The final heatmap has `r nrow(data.matrix)` due to the not unique key-value of gene symbols and probeids. All the probeids corresponding to the reported gene symbols are shown.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Clean up after stupid venndiagram
+do.call(file.remove, list(list.files(path = "./RESULTS/plots/", pattern = "*.log", full.names = TRUE)))
+do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE)))
+```
+
+A k means clustering was then applied to the genes classified as circadian only by JTK.
+
+```{r salva_jtk_only_aged_circa_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- data.matrix
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data,
+                                     centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+A 2 group k-means was calculated for the aged mice circadian genes.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 3
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+datafr.circa.wt.clusters <- merge(nls.results.circa, clusters, by.x = 1, by.y=0)
+clusters <- data.frame(table(data.matrix$clusters.cluster))
+
+# Add expresion and gene names
+datafr.circa.wt.clusters <- merge(datafr.circa.wt.clusters, affymetrix.data, by.x="feature", by.y="PROBE_ID")
+# Export to file
+# write.csv(datafr.circa.wt.clusters, "./RESULTS/Salva/files/salva_jtk_only_aged_circa_genes.csv", sep="", row.names = F)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with all the test info of those genes and the cluster each one is assigned to is in [salva_jtk_only_aged_circa_genes.csv](./RESULTS/Salva/files/salva_jtk_only_aged_circa_genes.csv)
+
+```{r salva_jtk_only_aged_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE, results='asis'}
+kable(clusters, col.names = c("Cluster", "Number of genes"))
+```
+
+```{r salva_jtk_only_aged_circa_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Aged mice circadian genes classified ONLY by JTK. (clustered by k-means)."}
+col.annotation <- data.frame(row.names = s2c_aged$sample, time = s2c_aged$time)
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), kmeans=data.matrix$clusters.cluster)
+
+# Custom colors
+cluster.color <- brewer.pal(length(clusters$Var1), "Dark2")
+t.colors <- data.frame(row.names = unique(s2c_aged$time)
+                     , color = time.color[1:length(time.color)%%2 != 0]
+                     , stringsAsFactors = F)
+c.colors <- data.frame(row.names = clusters$Var1
+                     , color = cluster.color[1:3]
+                     , stringsAsFactors = F)
+m.colors <- list(time = map.colors$condition[grep("Aged", names(map.colors$condition))]
+                 , cluster = setNames(as.list(c.colors)$color, clusters$Var1)
+                   )
+
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               s2c_aged$sample]
+column.order.all <- s2c_aged[order(s2c_aged$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k[,column.order.all]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = m.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(as.numeric(clusters$Freq))
+         , annotation_names_row = F
+         , annotation_names_col = F
+         , main = "aged genes detected with JTK but not paper"
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis. Three databases were consulted: Biological Process (BP), KEGG (kegg) and TF (tf). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:groups){
+cluster.martid <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+gene.list <- unique(p2g.ensembl[which(p2g.ensembl$PROBEID %in% cluster.martid), "ENSEMBL"])
+gene.list <- unlist(strsplit(gene.list, ","))
+go.data <- go.terms(gene.list)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [salva_jtk_only_aged_circa_kmeans_",i,"_GO_Terms.csv](files/salva_jtk_only_aged_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # ,sprintf("./RESULTS/Salva/files/salva_jtk_only_aged_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+## NLS vs. JTK3
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+adult_jtk <- as.character(jtk.results.q.adult$Probeset)
+aged_jtk <- as.character(jtk.results.q.aged$Probeset)
+adult_nls <- as.character(nls.results.circa.adult$feature)
+aged_nls <- as.character(nls.results.circa.aged$feature)
+```
+
+
+```{r salva_all_adult_jtk_nls, echo=FALSE, message=FALSE, warning=FALSE, fig.width=3, fig.height=3}
+intersection <- list(adult_jtk
+                     , adult_nls
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              , col = c("blue", "green")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("JTK", "NLS")
+              , cat.pos = c(0,0)
+              , cat.fontface = "bold"
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "Adult all genes"
+              , main.fontface = "bold"
+              
+)
+grid.draw(venn)
+```
+
+
+```{r salva_all_aged_jtk_nls, echo=FALSE, message=FALSE, warning=FALSE, fig.width=3, fig.height=3}
+intersection <- list(aged_jtk
+                     , aged_nls
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              , col = c("blue", "green")
+              , fill = NA
+              # , alpha = 0.40
+              , category.names = c("JTK", "NLS")
+              , cat.pos = c(0,0)
+              , cat.fontface = "bold"
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              # , rotation.degree = 45
+              , ext.text = FALSE
+              , main = "Aged all genes"
+              , main.fontface = "bold"
+              
+)
+grid.draw(venn)
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Get expression
+jtk_3_only_adult_list <- adult_jtk[which(adult_jtk %!in% adult_nls)]
+nls_only_adult_list <- adult_nls[which(adult_nls %!in% adult_jtk)]
+# jtk_3_only_adult <- exprs[jtk_3_only_adult_list,-1]
+# jtk_3_only_adult <- jtk_3_only_adult[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+
+jtk_3_only_aged_list <- aged_jtk[which(aged_jtk %!in% aged_nls)]
+nls_only_aged_list <- aged_nls[which(aged_nls %!in% aged_jtk)]
+# jtk_3_only_aged <- exprs[jtk_3_only_aged_list,-1]
+# jtk_3_only_aged <- jtk_3_only_aged[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+
+```
+
+```{r salva_jtk_only_adult_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.cap = "Rhythmic genes detected with local JTK only in adult mice.", fig.show='hold', fig.align='center'}
+# Plot expression
+col.annotation <- data.frame(row.names = s2c$sample, time = s2c$time)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))])
+pheatmap(  as.matrix(exprs[jtk_3_only_adult_list,s2c_adult$sample])
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = paste("JTK only adult genes")
+)
+```
+
+
+```{r salva_jtk_only_aged_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.cap = "Rhythmic genes detected with local JTK only in adult mice.", fig.show='hold', fig.align='center'}
+pheatmap(  as.matrix(exprs[jtk_3_only_aged_list,s2c_aged$sample])
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = paste("NLS only adult genes")
+)
+```
+
+
+```{r salva_nls_only_adult_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.cap = "Rhythmic genes detected with local nls only in adult mice.", fig.show='hold', fig.align='center'}
+# Plot expression
+col.annotation <- data.frame(row.names = s2c$sample, time = s2c$time)
+m.colors <- list(time = map.colors$condition[grep("Young", names(map.colors$condition))])
+pheatmap(  as.matrix(exprs[nls_only_adult_list,s2c_adult$sample])
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = paste("nls only adult genes")
+)
+```
+
+
+```{r salva_nls_only_aged_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.cap = "Rhythmic genes detected with local nls only in adult mice.", fig.show='hold', fig.align='center'}
+pheatmap(  as.matrix(exprs[nls_only_aged_list,s2c_aged$sample])
+           , scale = "row"
+           , color = hmcol
+           , border_color = "NA"
+           , cellwidth = 5
+           , cluster_rows = T
+           , cluster_cols = F
+           , treeheight_row = 0
+           , treeheight_col = 0
+           , annotation_col = col.annotation
+           , annotation_colors = m.colors
+           , legend = TRUE
+           , show_rownames = F
+           , show_colnames = T
+           , fontsize_col = 5
+           , gaps_col = nrow(s2c_adult)
+           , display_numbers = F
+           , annotation_names_row = F
+           , annotation_names_col = F
+           , main = paste("NLS only adult genes")
+)
+```
+
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+nls_adult <- exprs[nls_adult_list,-1]
+jtk_3_only_adult <- jtk_3_only_adult[,s2c[order(-xtfrm(s2c$group) ,s2c$time), "sample"]]
+```
+
+# References
+
+```{r bibliography, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+bibliography()
+```

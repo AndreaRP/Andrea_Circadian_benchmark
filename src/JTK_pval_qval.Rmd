@@ -1,0 +1,493 @@
+---
+title: "JTK pval vs q.val"
+author: "Andrea Rubio-Ponce"
+date: "`r format(Sys.time(), '%m, %Y')`"
+output: 
+  pdf_document: 
+    dev: pdf
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+documentclass: article
+urlcolor: blue
+classoption: a4paper
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{float}
+---
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+# Functions, Constants and graphical variables      
+knitr::opts_knit$set(root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/")
+require("knitr")
+knitr::opts_chunk$set(
+      	fig.align = "center",
+      	fig.path = "/data3/arubio/projects/Andrea_Circadian_benchmark/RESULTS/pval_qval/plots/",
+      	fig.pos = "H",
+      	message = FALSE,
+      	warning = FALSE,
+      	dev = c("pdf", "png"),
+      	dpi = 500,
+      	# include = FALSE,
+      	root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/"
+)
+setwd("/data3/arubio/projects/Andrea_Circadian_benchmark/")
+knitr::opts_knit$get("root.dir")
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library("mouse4302.db")
+library("pheatmap")
+library("RColorBrewer")
+library("affy")
+library("limma")
+library("tximport")
+library("edgeR")
+library("sva")
+library("RColorBrewer")
+library("pheatmap")
+library("biomaRt")
+library("ggplot2")
+library("gplots")
+library("NMF")
+library("cluster")
+library("fpc")
+library("plyr")
+library("sva")
+library("VennDiagram")
+library("gProfileR") # GO
+library("knitr")
+library("xtable")
+library("MetaCycle")
+library("knitcitations")
+library("HarmonicRegression")
+library("dplyr")
+library("reshape2")
+library("AnnotationDbi")
+# source("https://bioconductor.org/biocLite.R")
+
+library("affy")
+library("readxl")
+library("broom")
+source("./SRC/Regression_lib.R")
+source("./SW/JTKversion3/JTK_CYCLEv3.1.R")
+
+
+dir.create("./RESULTS/pval_qval/files/", recursive = T)
+cite_options(citation_format = "compatibility",
+hyperlink = FALSE, cite.style = "authoryear", super = FALSE,
+max.names = 1, longnamesfirst = FALSE, check.entries = FALSE)
+```
+
+# Description
+
+pvalue vs. qvalue results overview.
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+'%!in%' <- function(x,y)!('%in%'(x,y))
+n=11
+# hmcol <- colorRampPalette(c("#ce23cb","#000000", "#d6d633"))(n) # pink yellow dim
+hmcol <- colorRampPalette(c("#76a5f7","#0c001c", "#ff1d00"))(100) # blue red
+# hmcol <- colorRampPalette(c("#FF00FF","#000000","#FFFF00"))(n) # pink yellow seurat
+# Color gradient for each timepoint
+n=6
+colfunc<-colorRampPalette(c("#053061","orange","#67001F"))
+time.color <- colfunc(n)
+# plot(rep(1,length(hmcol)),col=(colfunc(length(hmcol))), pch=19,cex=2)
+
+# time.colors <- data.frame(row.names = unique(s2c$ZT)
+#                          , color = time.color
+#                          , stringsAsFactors = F)
+```
+
+<!-- # Liver RNAseq -->
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- jtk_results <- read.csv("../Ivan_Neutrophils_circadian_Liver/RESULTS/files/jtk_wt_result_liver.csv", row.names = 1) -->
+<!-- s2c <- read.csv("../Ivan_Neutrophils_circadian_Liver/DOC/s2c.csv", row.names = 1) -->
+<!-- s2c <- s2c[which(s2c$group=="WT"),] -->
+<!-- ``` -->
+
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- # Select pval genes -->
+<!-- pval <- jtk_results[which(jtk_results$ADJ.P<0.05 & jtk_results$PER>=20 & jtk_results$PER <=30),] -->
+<!-- qval <- jtk_results[which(jtk_results$BH.Q<0.05 & jtk_results$PER>=20 & jtk_results$PER <=30),] -->
+<!-- pval_list <- as.character(pval$Probeset) -->
+<!-- qval_list <- as.character(qval$Probeset) -->
+<!-- ``` -->
+
+<!-- ```{r rna_seq_jtk_pval_qval_venn, echo=FALSE, message=FALSE, warning=FALSE, fig.width=5, fig.height=5} -->
+<!-- intersection <- list(pval_list -->
+<!--                      , qval_list -->
+<!--                     ) -->
+<!-- venn <- venn.diagram( intersection -->
+<!--               , filename = NULL -->
+<!--               , scale = F -->
+<!--               , col = c("red", "blue") -->
+<!--               , fill = c("red", "blue") -->
+<!--               , alpha = 0.3 -->
+<!--               , category.names = c("p-value","BH") -->
+<!--               , cat.pos = c(0,0) -->
+<!--               , force.unique = TRUE -->
+<!--               , margin = 0.0 -->
+<!--               , cex = 2 -->
+<!--               , cat.cex = 2 -->
+<!--               # , ext.text = FALSE -->
+<!--               # , main = "NLS detected genes" -->
+<!--               # , main.fontface = "bold" -->
+<!-- ) -->
+
+<!-- grid.draw(venn) -->
+<!-- ``` -->
+
+<!-- ```{r, message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- # Clean up after stupid venndiagram -->
+<!-- do.call(file.remove, list(list.files(path = "./RESULTS/pval_qval/plots/", pattern = "*.log", full.names = TRUE))) -->
+<!-- do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE))) -->
+<!-- ``` -->
+
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- pval_only <- pval_list[which(pval_list %!in% qval_list)] -->
+<!-- ``` -->
+
+<!-- ```{r rna_seq_hm_pval_only, echo=FALSE, message=FALSE, warning=FALSE} -->
+<!-- col.annotation <- data.frame(row.names = s2c$sample, time = s2c$ZT) -->
+
+<!-- # Plot -->
+<!-- pheatmap(  as.matrix(jtk_results[pval_only,as.character(s2c$sample)]) -->
+<!--          , scale = "row" -->
+<!--          , color = hmcol -->
+<!--          , border_color = "NA" -->
+<!--          , cellwidth = 5 -->
+<!--          , cluster_rows = T -->
+<!--          , cluster_cols = F -->
+<!--          , treeheight_row = 0 -->
+<!--          , treeheight_col = 15 -->
+<!--          , annotation_col = col.annotation -->
+<!--          , legend = T -->
+<!--          , show_rownames = F -->
+<!--          , show_colnames = F -->
+<!--          , display_numbers = F -->
+<!--          , annotation_names_row = F -->
+<!--          , annotation_names_col = F -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r rna_seq_hm_qval_only, echo=FALSE, message=FALSE, warning=FALSE} -->
+<!-- col.annotation <- data.frame(row.names = s2c$sample, time = s2c$ZT) -->
+
+<!-- # Plot -->
+<!-- pheatmap(  as.matrix(jtk_results[qval_list,as.character(s2c$sample)]) -->
+<!--          , scale = "row" -->
+<!--          , color = hmcol -->
+<!--          , border_color = "NA" -->
+<!--          , cellwidth = 5 -->
+<!--          , cluster_rows = T -->
+<!--          , cluster_cols = F -->
+<!--          , treeheight_row = 0 -->
+<!--          , treeheight_col = 15 -->
+<!--          , annotation_col = col.annotation -->
+<!--          , legend = T -->
+<!--          , show_rownames = F -->
+<!--          , show_colnames = F -->
+<!--          , display_numbers = F -->
+<!--          , annotation_names_row = F -->
+<!--          , annotation_names_col = F -->
+<!-- ) -->
+<!-- ``` -->
+
+# Results
+## In silico data
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+jtk_results <- read.csv("./RESULTS/Subsampling/files/subsampling_JTK_24_4_3_reps.csv", row.names = 1)
+# Generate s2c
+times <- colnames_array <- grep("rep", colnames(jtk_results), value=T)
+colnames(jtk_results) <- gsub("_", "", colnames(jtk_results))
+colnames_array <- grep("rep", colnames(jtk_results), value=T)
+s2c <- data.frame(sample=colnames_array
+                 , ZT=gsub("[S\\_]", "", sapply(strsplit(times, "rep|\\."), "[[", 1))
+                 , ind=rep(c(1:3),length.out=length(colnames_array))
+                 , stringsAsFactors = F
+)
+
+# Get tp and fp
+full_exprs <- read.csv("./RAW/Subsampling/subsampling_in_silico_data.csv", row.names=1)
+# For per 20:30 (circadian)
+real_c_genes <- full_exprs[which(full_exprs$per>=20 & full_exprs$per <=30),]
+real_c_negat <- full_exprs[which(rownames(full_exprs) %!in% rownames(real_c_genes)),]
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Select pval genes
+pval <- jtk_results[which(jtk_results$ADJ.P < 0.05 & jtk_results$PER>=20 & jtk_results$PER <=30),]
+qval <- jtk_results[which(jtk_results$BH.Q<0.05 & jtk_results$PER>=20 & jtk_results$PER <=30),]
+pval_list <- as.character(pval$Probeset)
+qval_list <- as.character(qval$Probeset)
+```
+
+```{r in_silico_jtk_pval_qval_venn, echo=FALSE, message=FALSE, warning=FALSE, fig.width=3, fig.height=3}
+intersection <- list(pval_list
+                     , qval_list
+                    )
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = T
+              , col = c("red", "blue")
+              , fill = c("red", "blue")
+              , alpha = 0.3
+              , category.names = c("p-value","BH")
+              , cat.pos = c(0,0)
+              , force.unique = TRUE
+              , margin = 0.0
+              , cex = 2
+              , cat.cex = 2
+)
+
+grid.draw(venn)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Clean up after stupid venndiagram
+do.call(file.remove, list(list.files(path = "./RESULTS/pval_qval/plots/", pattern = "*.log", full.names = TRUE)))
+do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE)))
+```
+
+Plot all genes obtained with p-value, separated by true and false positives.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Classify genes in tp or fp
+all_results <- jtk_results[pval_list,]
+all_results[pval_list[which(pval_list %in% rownames(real_c_genes))],"class_pval"] <- "tp"
+all_results[pval_list[which(pval_list %!in% rownames(real_c_genes))],"class_pval"] <- "fp"
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+col.annotation <- data.frame(row.names = s2c$sample, time = s2c$ZT)
+# Row annotation
+row.annotation <- data.frame(row.names = all_results$Probeset, class=all_results$class_pval)
+# Define colors for each category
+map.colors <- list(time = setNames(time.color, unique(s2c$ZT))
+                  , class = c(tp = "deepskyblue3"
+                            , fp = "firebrick4")
+)
+# Subset to plot
+m <- all_results
+# Get the order of the clustered rows
+temp <- m[which(m$class_pval=="tp"),]
+ph.tp <- pheatmap(as.matrix(temp[,as.character(s2c$sample)]), cluster_rows=TRUE)$tree_row$order
+ph.tp <- temp[ph.tp,"Probeset"]
+temp <- m[which(m$class_pval=="fp"),]
+ph.fp <- pheatmap(as.matrix(temp[,as.character(s2c$sample)]), cluster_rows=TRUE)$tree_row$order
+ph.fp <- temp[ph.fp,"Probeset"]
+# Sort matrix
+m <- m[as.character(c(ph.fp, ph.tp)),]
+```
+
+From all the significant genes when using p-value<0.05 , `r length(ph.tp)` were TP (`r length(ph.tp)/(length(ph.tp)+length(ph.fp))*100`%) and `r length(ph.fp)` were FP (`r length(ph.fp)/(length(ph.tp)+length(ph.fp))*100`%).
+
+```{r in_silico_hm_pval_all, echo=FALSE, message=FALSE, warning=FALSE}
+# Plot
+pheatmap(  as.matrix(m[,as.character(s2c$sample)])
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 0
+         , annotation_row = row.annotation
+         , annotation_col = col.annotation
+         , annotation_colors = map.colors
+         , gaps_row = length(ph.fp)
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+```{r fp_tp_all_bars, echo=FALSE, message=FALSE, warning=FALSE, fig.width=2, fig.height=4}
+count <- t(rbind(pval=table(all_results$class_pval)))
+count <- melt(count)
+
+ggplot(count, aes(y = value, x = Var2, fill = Var1))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "deepskyblue3")
+                   # , labels = c("False Positives", "True Positives")
+                   ) +
+  ylab("Gene #") +
+  xlab("Filtering method") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)
+      , panel.background = element_blank())
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+pval_only <- pval_list[which(pval_list %!in% qval_list)]
+jtk_results[pval_only[which(pval_only %in% rownames(real_c_genes))],"class_pval"] <- "tp"
+jtk_results[pval_only[which(pval_only %!in% rownames(real_c_genes))],"class_pval"] <- "fp"
+jtk_results[qval_list[which(qval_list %in% rownames(real_c_genes))],"class_qval"] <- "tp"
+jtk_results[qval_list[which(qval_list %!in% rownames(real_c_genes))],"class_qval"] <- "fp"
+
+jtk_results[as.character(pval$Probeset[which(pval$Probeset %in% rownames(real_c_genes))]),"class_both"] <- "tp"
+jtk_results[as.character(pval$Probeset[which(pval$Probeset %!in% rownames(real_c_genes))]),"class_both"] <- "fp"
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+col.annotation <- data.frame(row.names = s2c$sample, time = s2c$ZT)
+# Row annotation
+row.annotation <- data.frame(row.names = jtk_results$Probeset, class=jtk_results$class_pval)
+# Define colors for each category
+map.colors <- list(time = setNames(time.color, unique(s2c$ZT))
+                  , class = c(tp = "deepskyblue3"
+                            , fp = "firebrick4")
+)
+# Subset to plot
+m <- jtk_results[pval_only,]
+# Get the order of the clustered rows
+temp <- m[which(m$class_pval=="tp"),]
+ph.tp <- pheatmap(as.matrix(temp[,as.character(s2c$sample)]), cluster_rows=TRUE)$tree_row$order
+ph.tp <- temp[ph.tp,"Probeset"]
+temp <- m[which(m$class_pval=="fp"),]
+ph.fp <- pheatmap(as.matrix(temp[,as.character(s2c$sample)]), cluster_rows=TRUE)$tree_row$order
+ph.fp <- temp[ph.fp,"Probeset"]
+# Sort matrix
+m <- m[as.character(c(ph.fp, ph.tp)),]
+```
+
+From the p-value only fraction, `r length(ph.tp)` were TP (`r length(ph.tp)/(length(ph.tp)+length(ph.fp))*100`%) and `r length(ph.fp)` were FP (`r length(ph.fp)/(length(ph.tp)+length(ph.fp))*100`%).
+
+```{r in_silico_hm_pval_only, echo=FALSE, message=FALSE, warning=FALSE}
+# Plot
+pheatmap(  as.matrix(m[,as.character(s2c$sample)])
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 0
+         , annotation_row = row.annotation
+         , annotation_col = col.annotation
+         , annotation_colors = map.colors
+         , gaps_row = length(ph.fp)
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Row annotation
+row.annotation <- data.frame(row.names = jtk_results$Probeset, class=jtk_results$class_qval)
+# Define colors for each category
+# Subset to plot
+m <- jtk_results[qval_list,]
+# Get the order of the clustered rows
+temp <- m[which(m$class_qval=="tp"),]
+ph.tp <- pheatmap(as.matrix(temp[,as.character(s2c$sample)]), cluster_rows=TRUE)$tree_row$order
+ph.tp <- temp[ph.tp,"Probeset"]
+temp <- m[which(m$class_qval=="fp"),]
+ph.fp <- pheatmap(as.matrix(temp[,as.character(s2c$sample)]), cluster_rows=TRUE)$tree_row$order
+ph.fp <- temp[ph.fp,"Probeset"]
+# Sort matrix
+m <- m[as.character(c(ph.fp, ph.tp)),]
+```
+
+From the q-value only fraction, `r length(ph.tp)` were TP (`r length(ph.tp)/(length(ph.tp)+length(ph.fp))*100`%) and `r length(ph.fp)` were FP (`r length(ph.fp)/(length(ph.tp)+length(ph.fp))*100`%).
+
+```{r in_silico_hm_qval_only, echo=FALSE, message=FALSE, warning=FALSE}
+# Plot
+pheatmap(  as.matrix(m[,as.character(s2c$sample)])
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 0
+         , annotation_row = row.annotation
+         , annotation_col = col.annotation
+         , annotation_colors = map.colors
+         , gaps_row = length(ph.fp)
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+```{r fp_tp_bars, echo=FALSE, message=FALSE, warning=FALSE, fig.width=3}
+count <- t(rbind(pval=table(jtk_results[as.character(pval$Probeset),]$class_both)
+             , qval=table(jtk_results[as.character(qval$Probeset),]$class_both)))
+count <- melt(count)
+
+ggplot(count, aes(y = value, x = Var2, fill = Var1))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "deepskyblue3")
+                   # , labels = c("False Positives", "True Positives")
+                   ) +
+  ylab("Gene #") +
+  xlab("Filtering method") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)
+        , panel.background = element_blank())
+```
+
+```{r fp_tp_bars_pval, echo=FALSE, message=FALSE, warning=FALSE, fig.width=3, fig.height=4}
+count <- t(rbind(pval=table(jtk_results[as.character(pval_only),]$class_both)))
+count <- melt(count)
+
+ggplot(count, aes(y = value, x = Var2, fill = Var1))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "deepskyblue3")
+                   # , labels = c("False Positives", "True Positives")
+                   ) +
+  ylab("Gene #") +
+  xlab("Filtering method") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)
+        , panel.background = element_blank())
+```
+
+```{r fp_tp_bars_qval, echo=FALSE, message=FALSE, warning=FALSE, fig.width=3, fig.height=4}
+count <- t(rbind(qval=table(jtk_results[as.character(qval$Probeset),]$class_both)))
+count <- melt(count)
+
+ggplot(count, aes(y = value, x = Var2, fill = Var1))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "deepskyblue3")
+                   # , labels = c("False Positives", "True Positives")
+                   ) +
+  ylab("Gene #") +
+  xlab("Filtering method") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)
+        , panel.background = element_blank())
+```
+
+
+
+# References
+
+```{r bibliography, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+bibliography()
+```

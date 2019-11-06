@@ -1,0 +1,1052 @@
+---
+title: "Liver analysis with jtk"
+author: "Andrea Rubio-Ponce"
+date: "`r format(Sys.time(), '%m, %Y')`"
+output: 
+  pdf_document: 
+    dev: pdf
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+documentclass: article
+urlcolor: blue
+classoption: a4paper
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{float}
+---
+
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+# Functions, Constants and graphical variables      
+knitr::opts_knit$set(root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/")
+require("knitr")
+knitr::opts_chunk$set(
+      	fig.align = "center",
+      	fig.path = "/data3/arubio/projects/Andrea_Circadian_benchmark/RESULTS/RNAseq/plots/",
+      	fig.pos = "H",
+      	message = FALSE,
+      	warning = FALSE,
+      	dev = c("pdf", "png"),
+      	dpi = 500,
+      	# include = FALSE,
+      	root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/"
+)
+setwd("/data3/arubio/projects/Andrea_Circadian_benchmark/")
+knitr::opts_knit$get("root.dir")
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+library("limma")
+library("tximport")
+# library("edgeR")
+library("sva")
+library("RColorBrewer")
+library("pheatmap")
+library("biomaRt")
+library("ggplot2")
+library("gplots")
+library("NMF")
+library("cluster")
+library("fpc")
+library("plyr")
+library("sva")
+library("VennDiagram")
+library("knitr")
+library("knitcitations")
+library("HarmonicRegression")
+library("dplyr")
+library("reshape2")
+library("cowplot")
+library("gProfileR") # GO
+library("RDAVIDWebService")
+source("/data3/arubio/src/scripts/Utils.R")
+source("/data3/arubio/programs/JTKversion3/JTK_CYCLEv3.1.R")
+library("ArpyLib")
+
+dir.create("./RESULTS/RNAseq/files/", recursive = T)
+dir.create("./RESULTS/RNAseq/plots/", recursive = T)
+cite_options(citation_format = "compatibility",
+hyperlink = FALSE, cite.style = "authoryear", super = FALSE,
+max.names = 1, longnamesfirst = FALSE, check.entries = FALSE)
+```
+
+
+```{r mart, message=FALSE, warning=FALSE, include=FALSE}
+temp <- mart.data.import()
+t2g.annot <- temp$t2g.annot
+```
+
+
+```{r functions, message=FALSE, warning=FALSE, include=FALSE}
+n=11
+# hmcol <- colorRampPalette(c("#ce23cb","#000000", "#d6d633"))(n) # pink yellow dim
+hmcol <- colorRampPalette(c("#76a5f7","#0c001c", "#ff1d00"))(n) # blue red
+# hmcol <- colorRampPalette(c("#FF00FF","#000000","#FFFF00"))(n) # pink yellow seurat
+go.terms <- function(gene.list, background.genes){
+  sel.genes <- gene.list
+  # # Gene universe
+  # all.genes <- unique(p2g.ensembl$ENSEMBL)
+  # all.genes <- unlist(strsplit(all.genes, ","))
+  # all.genes <- all.genes[complete.cases(all.genes)]
+  # Query
+  go.data <- gprofiler(sel.genes
+                     , organism = "mmusculus"
+                     , ordered_query = F
+                     , significant = T
+                     , exclude_iea = F
+                     , underrep = F
+                     , evcodes = F
+                     , region_query = F
+                     , max_p_value = 0.05
+                     , min_set_size = 0
+                     , max_set_size = 0
+                     , min_isect_size = 0
+                     , correction_method = "fdr"
+                     , hier_filtering = "none"
+                     , domain_size = "annotated"
+                     , custom_bg = background.genes
+                     , numeric_ns = ""
+                     , png_fn = F
+                     , include_graph = T
+                     , src_filter = c("GO:BP"
+                                      # , "KEGG"
+                                      # , "TF"
+                                      ))
+# Reformat table
+if (dim(go.data)[1]>0){  
+  go.data$term.id <- gsub(":", ": ", go.data$term.id)
+  go.data$term.name <- gsub("; motif:.*", "", go.data$term.name)
+  go.data$term.name.fancy <- apply(go.data, 1
+                                   , function(x) if (nchar(x["term.name"])>60) paste(substr(x["term.name"], 0, 59)
+                                                                                     , "...", sep="") else x["term.name"])
+  go.data <- go.data[, c("term.name", "term.id", "domain","term.size"
+                         , "overlap.size",  "subgraph.number", "p.value"
+                         , "query.size", "intersection", "precision", "term.name.fancy")]
+colnames(go.data) <- c("GO Term", "Term ID", "Domain","Term size", "Hits"
+                       , "subgraph.number", "p.value", "query.size"
+                       , "Genes", "Precision", "Term Name")
+}else{
+      go.data <- go.data[, c("term.name", "term.id", "domain","term.size"
+                             , "overlap.size",  "subgraph.number", "p.value"
+                             , "query.size", "intersection", "precision")]
+      colnames(go.data) <- c("GO Term", "Term ID", "Domain","Term size", "Hits"
+                             , "subgraph.number", "p.value", "query.size", "Genes", "Precision")
+}
+  go.data <- go.data[order(go.data$p.value),]
+  return(go.data)
+}
+```
+
+# Experiment description
+
+The circadian RNAseq of liver samples was analyzed with NLS and JTK. The results are compared here.
+
+# Results
+
+```{r metadata, message=FALSE, warning=FALSE, include=FALSE}
+# METADATA
+s2c <- read.csv("../Ivan_Neutrophils_circadian_Liver/DOC/s2c.csv")
+n.samples <- as.integer(dim(s2c)[1])
+# Column annotation
+col.annotation <- data.frame(row.names = s2c$sample, condition = s2c$condition)
+# Define color palette for time:
+# time.color <- brewer.pal(length(unique(s2c$ZT))*2, "Paired")
+paired <- rev(brewer.pal(12, "Paired"))
+map.colors <- list(condition = setNames(paired, unique(s2c$condition)))
+time.color <- as.character(unlist(map.colors))
+```
+
+
+### WT
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+s2c.wt <- s2c[which(s2c$group=="WT"),]
+s2c.wt <- dplyr::rename(s2c.wt
+                     , time = ZT
+                     , ind = subjectID)
+s2c.wt$time <- as.numeric(s2c.wt$time)
+
+exprs <- read.csv("../Ivan_Neutrophils_circadian_Liver/ANALYSES/NLS/files/normalized_counts.csv"
+                                , row.names = 1)
+jtk.results.liver <- read.csv("../Ivan_Neutrophils_circadian_Liver/ANALYSES/NLS/files/jtk_wt_result_liver.csv"
+                                , row.names = 1)
+# Select genes with per <30; >20 and amp != 0
+jtk_genes_q <- jtk.results.liver[which(jtk.results.liver$BH.Q < 0.05 &
+                                       jtk.results.liver$PER>=20 & jtk.results.liver$PER <=30),]
+jtk_genes_p <- jtk.results.liver[which(jtk.results.liver$ADJ.P < 0.05 & 
+                                       jtk.results.liver$PER>=20 & jtk.results.liver$PER <30),]
+
+
+nls.results.liver <- read.csv("../Ivan_Neutrophils_circadian_Liver/ANALYSES/NLS/files/nls_wt_result_liver.csv"
+                                , row.names = 1)
+nls_genes_q <- nls.results.liver[which(nls.results.liver$estimate.per<=30 &
+                                      nls.results.liver$estimate.per>=20 &
+                                     (nls.results.liver$BH.q.value.per<0.05 | is.na(nls.results.liver$BH.q.value.per)) &
+                                      nls.results.liver$r>=0.7 &
+                                      nls.results.liver$BH.q.value.amp<0.05
+                                     ),]
+```
+
+
+```{r liver_rna_seq_venn_nls_jtk, echo=FALSE, fig.height=3, fig.width=3, message=FALSE, warning=FALSE}
+intersection <- list(as.character(jtk_genes_q$Probeset)
+                   , as.character(nls_genes_q$feature))
+venn <- venn.diagram( intersection
+              , filename = NULL
+              , scale = F
+              # , col = c("red", "blue")
+              # , fill = c("red", "blue")
+              , alpha = 0.3
+              , category.names = c("JTK","NLS")
+              , cat.pos = c(0,0)
+              , force.unique = TRUE
+              , margin = 0.0
+              , scaled=T
+              # , cex = 2
+              # , ext.text = FALSE
+              # , main = "NLS detected genes"
+              # , main.fontface = "bold"
+)
+grid.draw(venn)
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Clean up after stupid venndiagram
+do.call(file.remove, list(list.files(path = "./RESULTS/Ivan_Neutrophils_circadian_Liver/", pattern = "*.log", full.names = TRUE)))
+do.call(file.remove, list(list.files(path = "./", pattern = "*.log", full.names = TRUE)))
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+col.annotation <- data.frame(row.names = s2c.wt$sample, time = s2c.wt$condition)
+
+map.colors <- list(time = setNames(time.color, unique(s2c.wt$condition))
+                   )
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+nls_only_features <- as.character(nls_genes_q$feature[which(nls_genes_q$feature %!in% jtk_genes_q$Probeset)])
+nls_only <- exprs[nls_only_features,]
+# Plot
+nls_hm <- pheatmap(nls_only[,as.character(s2c.wt$sample)]
+                 , scale = "row"
+                 , color = hmcol
+                 , border_color = "NA"
+                 , cellwidth = 7
+                 , cluster_rows = T
+                 , cluster_cols = F
+                 , treeheight_row = 0
+                 , treeheight_col = 0
+                 , annotation_col = col.annotation
+                 , annotation_colors = map.colors
+                 , legend = TRUE
+                 , show_rownames = F
+                 , show_colnames = T
+                 , display_numbers = F
+                 , annotation_names_row = F
+                 , annotation_names_col = F
+                 , main = "NLS"
+                  )
+jtk_only_features <- as.character(jtk_genes_q$Probeset[which(jtk_genes_q$Probeset %!in% nls_genes_q$feature)])
+jtk_only <- exprs[jtk_only_features,]
+# Plot
+jtk_hm <- pheatmap(jtk_only[,as.character(s2c.wt$sample)]
+                 , scale = "row"
+                 , color = hmcol
+                 , border_color = "NA"
+                 , cellwidth = 7
+                 , cluster_rows = T
+                 , cluster_cols = F
+                 , treeheight_row = 0
+                 , treeheight_col = 0
+                 , annotation_col = col.annotation
+                 , annotation_colors = map.colors
+                 , legend = TRUE
+                 , show_rownames = F
+                 , show_colnames = T
+                 , display_numbers = F
+                 , annotation_names_row = F
+                 , annotation_names_col = F
+                 , main="JTK"
+                  )
+
+intersection_only_features <- as.character(jtk_genes_q$Probeset[which(jtk_genes_q$Probeset %in% nls_genes_q$feature)])
+intersection_only <- exprs[intersection_only_features,]
+intersection_hm <- pheatmap(intersection_only[,as.character(s2c.wt$sample)]
+                 , scale = "row"
+                 , color = hmcol
+                 , border_color = "NA"
+                 , cellwidth = 7
+                 , cluster_rows = T
+                 , cluster_cols = F
+                 , treeheight_row = 0
+                 , treeheight_col = 0
+                 , annotation_col = col.annotation
+                 , annotation_colors = map.colors
+                 , legend = TRUE
+                 , show_rownames = F
+                 , show_colnames = T
+                 , display_numbers = F
+                 , annotation_names_row = F
+                 , annotation_names_col = F
+                 , main="Intersection"
+                  )
+```
+
+```{r nls_only_hm, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Fraction of genes only detected by NLS."}
+nls_hm
+```
+
+```{r jtk_only_hm, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Fraction of genes only detected by JTK."}
+jtk_hm
+```
+
+```{r intersection_only_hm, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Fraction of genes detected by both algorithms."}
+intersection_hm
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Get the row ordering for each section
+# NLS genes
+nls_only_order <- nls_hm$tree_row$order
+nls_only_order <- rownames(nls_only[nls_only_order,])
+# Shared genes
+intersection_only_order <- intersection_hm$tree_row$order
+intersection_only_order <- rownames(intersection_only[intersection_only_order,])
+# JTK genes
+jtk_only_order <- jtk_hm$tree_row$order
+jtk_only_order <- rownames(jtk_only[jtk_only_order,])
+# Generate the matrix with all genes
+all.genes <- rbind(nls_only[nls_only_order,]
+                 , intersection_only[intersection_only_order,]
+                 , jtk_only[jtk_only_order,])
+
+all.genes$algorithm <- "NA"
+all.genes[nls_only_order,]$algorithm <- "NLS"
+all.genes[jtk_only_order,]$algorithm <- "JTK"
+all.genes[intersection_only_order,]$algorithm <- "Both"
+
+col.annotation <- data.frame(row.names = s2c.wt$sample, time = s2c.wt$time)
+# Row annotation
+row.annotation <- data.frame(row.names = all.genes$Row.names, Algorithm=all.genes$algorithm)
+# Define colors for each category
+map.colors <- list(time = setNames(time.color, unique(s2c.wt$time))
+                  , Algorithm = c(NLS = "#6fd4fc"
+                                , JTK = "#f0ff72"
+                                , Both= "#90fc6f")
+)
+```
+
+
+```{r in_silico_hm_merged, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Genes detected by each separate algorithm or by the two of them."}
+# Plot
+pheatmap(  as.matrix(all.genes[,as.character(s2c.wt$sample)])
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 0
+         , annotation_row = row.annotation
+         , annotation_col = col.annotation
+         , annotation_colors = map.colors
+         , gaps_row = cumsum(c(length(nls_only_features), length(intersection_only_features),length(jtk_only_features)))
+         , legend = T
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+#### GO analysis
+
+Next, we wanted to make a GO analysis of the genes obtained with JTK and NLS (both with the shared fraction to get the whole picture.). For that we divided eah heatmap in clusters using k-means.
+
+##### NLS 
+
+```{r nls_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- as.matrix(exprs[as.character(nls_genes_q$feature), as.character(s2c.wt$sample)])
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data, centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 4
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+# Add expresion and gene names
+data.matrix <- merge(data.matrix, t2g.annot, by.x="Row.names", by.y="ens_gene")
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+# Change clusters to get right order
+data.matrix$clusters.cluster <-  as.numeric(revalue(as.character(data.matrix$clusters.cluster)
+                                                    , c("2"="1","4"="2","3"="3","1"="4")))
+# Export to file
+# #write.csv(data.matrix, "./RESULTS/RNAseq/files/nls_genes_kmeans.csv", sep="", row.names = T)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with all the test info of those genes and the cluster each one is assigned to is in [nls_genes_kmeans.csv](./RESULTS/RNAseq/files/nls_genes_kmeans.csv)
+
+```{r nls_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE}
+kable(table(clusters), col.names = c("Cluster", "Number of genes"))
+```
+
+
+```{r hm_nls_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Genes detected by NLS"}
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), cluster=data.matrix$clusters.cluster)
+col.annotation <- data.frame(row.names = s2c.wt$sample, time = s2c.wt$condition)
+map.colors <- list(time = setNames(time.color, unique(s2c.wt$condition))
+                 , cluster=setNames(c("#009e73", "#0072b2", "#d55e00","#cc79a7"), clusters$Var1)
+                   )
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               as.character(s2c.wt$sample)]
+# column.order.all <- s2c.wt[order(s2c.wt$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k
+         , scale = "row"
+         , color = hmcol
+         # , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = map.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(table(data.matrix$clusters.cluster))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis. Three databases were consulted: Biological Process (BP), KEGG (kegg) and TF (tf). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:4){
+cluster.genes <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+background.genes <- as.character(exprs$Row.names)
+go.data <- go.terms(cluster.genes, background.genes)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [nls_circa_kmeans_",i,"_GO_Terms.csv](files/nls_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # #write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # ,sprintf("./RESULTS/RNAseq/files/nls_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+###### Gene FC for IPA
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Get genes by cluster and determine their FC (peak - valley)
+kmeans <- read.csv("./RESULTS/RNAseq/files/nls_genes_kmeans.csv")
+```
+
+##### JTK 
+
+```{r jtk_genes_cluster_withinss, echo=FALSE, message=FALSE, warning=FALSE}
+data <- as.matrix(exprs[as.character(jtk_genes_q$Probeset), as.character(s2c.wt$sample)])
+wss <- (nrow(data)-1)*sum(apply(data,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(data, centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", xlim=c(0,10),
+     ylab="Within groups sum of squares")
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+# Only expression data for k-means
+groups <- 4
+data.matrix <- data
+set.seed(20)
+clusters = amap::Kmeans(x = data.matrix, centers = groups, method = "pearson")
+clusters <- data.frame(clusters$cluster)
+# Merge data matrix and cluster
+data.matrix <- merge(data, clusters, by=0)
+# Add expresion and gene names
+data.matrix <- merge(data.matrix, t2g.annot, by.x="Row.names", by.y="ens_gene")
+rownames(data.matrix) <- data.matrix$Row.names
+data.matrix <- data.matrix[,-1]
+# Reoirder clusters
+data.matrix$clusters.cluster <- as.numeric(revalue(as.character(data.matrix$clusters.cluster)
+                                                 , c("4"="1","3"="2","1"="3", "2"="4"))) # numeric
+# Export to file
+# #write.csv(data.matrix, "./RESULTS/RNAseq/files/jtk_genes_kmeans.csv", sep="", row.names = T)
+```
+
+The genes number of genes assigned to each cluster are shown in the table below. The file with all the test info of those genes and the cluster each one is assigned to is in [jtk_genes_kmeans.csv](./RESULTS/RNAseq/files/jtk_genes_kmeans.csv)
+
+```{r jtk_genes_liver_cluster_table, echo=FALSE, fig.cap="Number of genes per k-means group.", message=FALSE, warning=FALSE}
+kable(table(clusters), col.names = c("Cluster", "Number of genes"))
+```
+
+
+```{r hm_jtk_genes_kmeans, message=FALSE, warning=FALSE, echo=FALSE, fig.cap="Genes detected by jtk"}
+# Row annotation
+row.annotation <- data.frame(row.names = rownames(data.matrix), cluster=data.matrix$clusters.cluster)
+col.annotation <- data.frame(row.names = s2c.wt$sample, time = s2c.wt$condition)
+map.colors <- list(time = setNames(time.color, unique(s2c.wt$condition))
+                   , cluster=setNames(c("#009e73", "#0072b2", "#d55e00","#cc79a7"), clusters$Var1)
+                   )
+# Order
+data.matrix.k <- data.matrix[order(data.matrix$clusters.cluster),
+                               as.character(s2c.wt$sample)]
+# column.order.all <- s2c.wt[order(s2c.wt$time), "sample"]
+
+# Plot
+pheatmap(  data.matrix.k
+         , scale = "row"
+         , color = hmcol
+         # , border_color = "NA"
+         , cellwidth = 7
+         , cluster_rows = F
+         , cluster_cols = F
+         , treeheight_row = 15
+         , treeheight_col = 15
+         , annotation_col = col.annotation
+         , annotation_row = row.annotation
+         , annotation_colors = map.colors
+         , legend = T
+         , show_rownames = F
+         , show_colnames = T
+         , display_numbers = F
+         , gaps_row = cumsum(table(data.matrix$clusters.cluster))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+The genes in each cluster were analized with gProfileR v0.6.1 for functional enrichment analysis. Three databases were consulted: Biological Process (BP), KEGG (kegg) and TF (tf). Only the clusters where significant GO functions were found are reported. GO Terms ordered by Precision. When more than 20 terms were found, only the first 20 are shown.
+
+```{r echo=FALSE, results='asis'}
+for (i in 1:4){
+cluster.genes <- rownames(data.matrix[which(data.matrix$clusters.cluster==i),])
+background.genes <- as.character(exprs$Row.names)
+go.data <- go.terms(cluster.genes, background.genes)
+  if (dim(go.data)[1]>0) {
+    cat('\n')
+    cat("* Cluster ", i, ":           \n")
+    cat("\t\t+ Complete results:   [jtk_circa_kmeans_",i,"_GO_Terms.csv](files/jtk_circa_kmeans_",i,"_GO_Terms.csv) ", sep="")
+    # Export to file
+  # #write.csv(go.data[,c("Term ID", "GO Term", "Domain","Term size", "Hits"
+  #            ,  "subgraph.number", "p.value", "query.size", "Genes"
+  #            , "Precision")]
+  # ,sprintf("./RESULTS/Salva/files/jtk_circa_kmeans_%s_GO_Terms.csv", i))
+
+    if(dim(go.data)[1]>20){
+      print(kable(go.data[1:20, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                  , caption = sprintf("Cluster %s first 20 GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+      }else{
+        print(kable(go.data[, c("Term ID","Term Name", "Domain", "Precision", "p.value")]
+                    , caption = sprintf("Cluster %s GO results.", i), escape = TRUE, digits=60, row.names= FALSE))
+        }
+    cat('\n')
+      }
+}
+```
+
+### Comparison
+
+```{r venn, echo=FALSE}
+jtk <- read.csv("./RESULTS/RNAseq/files/jtk_genes_kmeans.csv", stringsAsFactors = F, row.names = 1)
+nls <- read.csv("./RESULTS/RNAseq/files/nls_genes_kmeans.csv", stringsAsFactors = F, row.names = 1)
+
+library("venn")
+ven.list <- list(JTK=rownames(jtk)
+               , NLS=rownames(nls)
+              )
+
+ven.diagram <- venn::venn(x=ven.list
+                       , ilab=TRUE
+                       , zcolor = "style"
+                       , intersections=T
+                       , show.plot=T)
+intersections <- attr(ven.diagram,"intersections")
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+jtk.only <- jtk[intersections$JTK ,]
+# #write.csv(jtk.only, "./RESULTS/RNAseq/files/jtk.only.genes.csv")
+
+nls.only <- nls[intersections$NLS,]
+# exprs_data <- exprs[rownames(nls.only),]
+nls.merged <- cbind(nls.only, nls_genes_q[match(rownames(nls.only), nls_genes_q$feature),])
+# #write.csv(nls.merged, "./RESULTS/RNAseq/files/nls.only.genes.csv")
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+pheatmap(  nls.merged[,as.character(s2c.wt$sample)]
+         , scale = "row"
+         , color = hmcol
+         , border_color = "NA"
+         , cellwidth = 5
+         , cluster_rows = T
+         , cluster_cols = F
+         , treeheight_row = 0
+         , treeheight_col = 0
+         , annotation_col = col.annotation
+         # , annotation_row = row.annotation
+         # , annotation_colors = map.colors.kmeans[1:2]
+         , legend = TRUE
+         , show_rownames = F
+         , show_colnames = F
+         , display_numbers = F
+         # , gaps_row = cumsum(as.numeric(table(clusters$clusters.cluster)))
+         , annotation_names_row = F
+         , annotation_names_col = F
+)
+```
+
+### Genes for qPCR
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Sort by r the genes that are detected only in NLS
+nls.merged <- nls.merged[order(-xtfrm(nls.merged$r)),]
+
+```
+
+We plot genes found by CircaN but not JTK (selected for being interesting or their high r).
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library("plyr")
+library("ggplot2")
+std.err <- function(x) sd(x)/sqrt(length(x))
+s2c.wt$sample <- as.character(s2c.wt$sample)
+# gene_list <- which(nls.merged$feature %in% (nls.merged[which(nls.merged$ext_gene %in%
+#                                                                c("Ptma", "Bst2", "Ifrgr1"
+#                                                                , "Il18", "Nrn1", "Cul3")),"feature"]))
+# candidates <- c(100:150
+#               # , gene_list
+#               )
+candidates <- which(nls.merged$feature %in% (nls.merged[which(nls.merged$ext_gene %in%
+                                            c("Nab1", "Il18", "Ptma", "Dennd4c", "Crbn", "Naa50")),"feature"]))
+for (gene in candidates){
+  data.long.wt <- data.frame(data = as.numeric(t(exprs[which(exprs[,"ext_gene"] == nls.merged[gene, "ext_gene"])
+                                                    ,s2c.wt$sample]))
+                        , time = s2c.wt$time
+                        , ind = s2c.wt$ind
+                        , condition = s2c.wt$group
+                          )
+  data.long.wt.mean <- aggregate(data.long.wt[, 1], list(data.long.wt$time), mean)
+  colnames(data.long.wt.mean) <- c("time", "data")
+  data.long.wt.mean$ind <- rep("mean_ind", each=nrow(data.long.wt.mean))
+  data.long.wt.mean$condition <- rep("mean", each=nrow(data.long.wt.mean))
+  data.long.wt.std.err <- ddply(data.long.wt, .(time), summarize, sderr = std.err(data))
+  g1 <- plyr::round_any(as.numeric(nls.merged[gene, c("estimate.amp", "estimate.per"
+                                , "estimate.phase", "r")]), accuracy = .01, f = floor)
+  
+  temp <- ggplot(data.long.wt, aes(x = time, y = data, group = condition)) +
+  stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(data.long.wt.mean$data)
+              , size=0.2, colour="red") + # regression function
+  geom_line(data=data.long.wt.mean, aes(group = interaction(condition, ind))
+          , size=0.4, color="#1e8449") + # mean line
+  geom_point(data=data.long.wt.mean, aes(group = interaction(condition, ind), color=condition)
+           , size=0.7, colour="#2ecc71") +# 
+  geom_errorbar(data=data.long.wt.mean, aes(ymin=data-data.long.wt.std.err$sderr
+                                          , ymax=data+data.long.wt.std.err$sderr
+                                          , color=condition), width=0.3, color="#1e8449", size=0.1) +
+  scale_x_continuous(name="Time", breaks=as.numeric(unique(s2c.wt$ZT))) +
+  ylab("Expression") +
+  ggtitle(nls.merged[gene,"ext_gene"]) +
+  theme_minimal()
+  
+  assign(paste("gene", gene, sep="_"), plot_to_gtable(temp))
+}
+
+```
+
+
+<!-- ```{r circan_only_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.height=20, fig.width=8} -->
+<!-- plot_list <- list() -->
+<!-- for(i in paste("gene", candidates, sep="_")){ -->
+<!--   plot_list[[i]] <- get(i) -->
+<!-- } -->
+
+<!-- plot_grid(plotlist=plot_list -->
+<!--         , ncol = 3) -->
+<!-- ``` -->
+
+
+```{r circan_selected_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.height=4, fig.width=8}
+plot_list <- list()
+for(i in paste("gene", candidates, sep="_")){
+  plot_list[[i]] <- get(i)
+}
+
+plot_grid(plotlist=plot_list
+        , ncol = 3)
+```
+
+
+<!-- #### Word cloud -->
+
+<!-- First, the top 20 categories of each cluster are selected (by p.value). Then all the categories are merged. and the results is shown. -->
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- # Get the GO analyses of each section -->
+<!-- for (a in c("nls", "jtk")){ -->
+<!--   for (i in 1:4){ -->
+<!--     temp <- read.csv(sprintf("./RESULTS/RNAseq/files/%s_circa_kmeans_%s_GO_Terms.csv", a, i), stringsAsFactors = F) -->
+<!--     temp <- temp[order(temp$p.value),] -->
+<!--     if(nrow(temp)>20){ -->
+<!--       temp <- temp[1:20,] -->
+<!--     } -->
+<!--     assign(paste(a, "cluster", i, sep="_"), temp) -->
+<!--   } -->
+<!-- } -->
+
+<!-- nls_go <- unique(c(nls_cluster_1$GO.Term, nls_cluster_2$GO.Term, nls_cluster_3$GO.Term, nls_cluster_4$GO.Term)) -->
+<!-- jtk_go <- unique(c(jtk_cluster_1$GO.Term, jtk_cluster_2$GO.Term, jtk_cluster_3$GO.Term, jtk_cluster_4$GO.Term)) -->
+
+<!-- source('/data3/arubio/programs/rquery_wordcloud.r') -->
+<!-- ``` -->
+
+<!-- ```{r nls_word_cloud, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Word cloud of GO terms detected in clusters from the NLS analysis."} -->
+<!-- x <- nls_go -->
+<!-- res <- rquery.wordcloud(x, type ="text", lang = "english" -->
+<!--                         , textStemming = F -->
+<!--                         # , colorPalette = c(colorRampPalette(c("#e7f0fa", "#c9e2f6", "#95cbee" -->
+<!--                         #                                       , "#0099dc", "#4ab04a", "#ffd73e"))(10) -->
+<!--                         #                    , colorRampPalette(c("#eec73a", "#e29421", "#e29421" -->
+<!--                         #                                         , "#f05336","#ce472e"), bias=2)(90)) -->
+<!--                         , colorPalette = rev(brewer.pal(8, "Spectral")) -->
+<!--                         # , max.words=200 -->
+<!--                         # , excludeWords = c("process") -->
+<!--                         , min.freq = 1) -->
+
+<!-- # See word counts -->
+<!-- tdm <- res$tdm -->
+<!-- nls_freqTable <- res$freqTable -->
+<!-- ``` -->
+
+
+<!-- ```{r jtk_word_cloud, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Word cloud of GO terms detected in clusters from the JTK analysis."} -->
+<!-- x <- jtk_go -->
+<!-- res <- rquery.wordcloud(x, type ="text", lang = "english" -->
+<!--                         , textStemming = F -->
+<!--                         # , colorPalette = c(colorRampPalette(c("#e7f0fa", "#c9e2f6", "#95cbee" -->
+<!--                         #                                       , "#0099dc", "#4ab04a", "#ffd73e"))(10) -->
+<!--                         #                    , colorRampPalette(c("#eec73a", "#e29421", "#e29421" -->
+<!--                         #                                         , "#f05336","#ce472e"), bias=2)(90)) -->
+<!--                         , colorPalette = rev(brewer.pal(8, "Spectral")) -->
+<!--                         , max.words=200 -->
+<!--                         # , excludeWords = c("process") -->
+<!--                         , min.freq = 1) -->
+
+<!-- # See word counts -->
+<!-- tdm <- res$tdm -->
+<!-- jtk_freqTable <- res$freqTable -->
+<!-- ``` -->
+
+<!-- In this section we merge all the NLS and JTK terms and unique words from NLS or JTK are colored accordinlgy. If the word was unique to NLS go terms it is colored in blue, if it was unique to JTK terms it is colored in green and if it was in both it is colored in yellow. -->
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- res <- rquery.wordcloud(c(nls_go,jtk_go), type ="text", lang = "english" -->
+<!--                         , textStemming = F -->
+<!--                         , colorPalette = "Spectral", max.words=200 -->
+<!--                         # , excludeWords = c("process") -->
+<!--                         , min.freq = 1) -->
+
+<!-- # See word counts -->
+<!-- tdm <- res$tdm -->
+<!-- all_freqTable <- res$freqTable -->
+
+<!-- # Words only in nls -->
+<!-- nls_word_list <- gsub(",", "", nls_go) -->
+<!-- nls_word_list <- unique(unlist(strsplit(nls_word_list, " "))) -->
+<!-- # Words only in jtk -->
+<!-- jtk_word_list <- gsub(",", "", jtk_go) -->
+<!-- jtk_word_list <- unique(unlist(strsplit(jtk_word_list, " "))) -->
+
+<!-- nls_only_words <- nls_word_list[which(nls_word_list %!in% jtk_word_list)] -->
+<!-- jtk_only_words <- jtk_word_list[which(jtk_word_list %!in% nls_word_list)] -->
+<!-- common_words <- nls_word_list[which(nls_word_list %in% jtk_word_list)] -->
+
+<!-- annotation <- all_freqTable -->
+<!-- annotation$alg <- "both" -->
+<!-- # Which words in the whole cloud come from NLS -->
+<!-- annotation$alg[which(annotation$word %in% nls_only_words)] <- "nls" -->
+<!-- annotation$alg[which(annotation$word %in% jtk_only_words)] <- "jtk" -->
+<!-- ``` -->
+
+
+<!-- ```{r both_word_cloud, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Word cloud of GO terms detected in clusters from the union of the two algorithms results. Yellow words appared in both GO analyses, blue words appeared only in GO analysis of the NLS genes (clustered by k-means), and green words appeared only in the GO analysis of genes detected by JTK (clustered by k-means)."} -->
+<!-- wordcloud(words = annotation$word -->
+<!--           , freq = annotation$freq -->
+<!--           # , scale = c(8,15) -->
+<!--           , min.freq=1 -->
+<!--           # , max.words=max.words -->
+<!--           , random.order=FALSE -->
+<!--           # , rot.per=0.35 -->
+<!--           , use.r.layout=FALSE -->
+<!--           , colors=c(revalue(annotation$alg, c(nls = "#2f5593", jtk = "#379122", both = "#afaf2b"))) -->
+<!--           , ordered.colors = T -->
+<!--           ) -->
+<!-- ``` -->
+
+<!-- Now we take only the top 20 words of each category. -->
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE, fig.cap="Word cloud of the top 20 words detected by NLS, JTK or both. Yellow words appared in both GO analyses, blue words appeared only in GO analysis of the NLS genes (clustered by k-means), and green words appeared only in the GO analysis of genes detected by JTK (clustered by k-means)."} -->
+<!-- top20 <- as.data.frame(annotation %>% group_by(alg) %>% top_n(20, freq)) #(dplyr) -->
+<!-- top20$freq_log <- round(log2(top20$freq)) -->
+<!-- wordcloud(words = top20$word -->
+<!--           , freq = top20$freq -->
+<!--           # , scale = c(8,15) -->
+<!--           , min.freq=1 -->
+<!--           # , max.words=max.words -->
+<!--           , random.order=FALSE -->
+<!--           # , rot.per=0.35 -->
+<!--           , use.r.layout=FALSE -->
+<!--           , colors=c(revalue(top20$alg, c(nls = "#2f5593", jtk = "#379122", both = "#afaf2b"))) -->
+<!--           , ordered.colors = T -->
+<!--           ) -->
+<!-- ``` -->
+
+<!-- ##### Comparison by cluster -->
+
+<!-- Comparison of GO terms for comparable clusters in NLS and JTK. -->
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- x <- nls_cluster_4$GO.Term -->
+<!-- res <- rquery.wordcloud(x, type ="text", lang = "english" -->
+<!--                         , textStemming = F -->
+<!--                         # , colorPalette = c(colorRampPalette(c("#e7f0fa", "#c9e2f6", "#95cbee" -->
+<!--                         #                                       , "#0099dc", "#4ab04a", "#ffd73e"))(10) -->
+<!--                         #                    , colorRampPalette(c("#eec73a", "#e29421", "#e29421" -->
+<!--                         #                                         , "#f05336","#ce472e"), bias=2)(90)) -->
+<!--                         , colorPalette = rev(brewer.pal(8, "Spectral")) -->
+<!--                         # , max.words=200 -->
+<!--                         # , excludeWords = c("process") -->
+<!--                         , min.freq = 1) -->
+
+<!-- # See word counts -->
+<!-- tdm <- res$tdm -->
+<!-- nls_freqTable <- res$freqTable -->
+<!-- ``` -->
+
+<!-- ```{r nls_evening_word_cloud, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Word cloud of GO terms detected in the evening cluster of NLS (cluster 4)"} -->
+<!-- wordcloud(words = nls_freqTable$word -->
+<!--           , freq = nls_freqTable$freq -->
+<!--           # , scale = c(8,15) -->
+<!--           , min.freq=1 -->
+<!--           # , max.words=max.words -->
+<!--           # , random.order=FALSE -->
+<!--           # , rot.per=0.35 -->
+<!--           , use.r.layout=FALSE -->
+<!--           # , colors=c(colorRampPalette(c("#e7f0fa", "#c9e2f6", "#95cbee", "#0099dc", "#4ab04a", "#ffd73e"))(10), -->
+<!--           #           colorRampPalette(c("#eec73a", "#e29421", "#e29421", "#f05336","#ce472e"), bias=2)(90)) -->
+<!--           , colors = rev(brewer.pal(8, "Spectral")) -->
+<!--           # , ordered.colors = T -->
+<!-- ) -->
+<!-- ``` -->
+
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- x <- jtk_cluster_1$GO.Term -->
+<!-- res <- rquery.wordcloud(x, type ="text", lang = "english" -->
+<!--                         , textStemming = F -->
+<!--                         # , colorPalette = c(colorRampPalette(c("#e7f0fa", "#c9e2f6", "#95cbee" -->
+<!--                         #                                       , "#0099dc", "#4ab04a", "#ffd73e"))(10) -->
+<!--                         #                    , colorRampPalette(c("#eec73a", "#e29421", "#e29421" -->
+<!--                         #                                         , "#f05336","#ce472e"), bias=2)(90)) -->
+<!--                         , colorPalette = rev(brewer.pal(8, "Spectral")) -->
+<!--                         # , max.words=200 -->
+<!--                         # , excludeWords = c("process") -->
+<!--                         , min.freq = 1) -->
+
+<!-- # See word counts -->
+<!-- tdm <- res$tdm -->
+<!-- nls_freqTable <- res$freqTable -->
+<!-- ``` -->
+
+<!-- ```{r jtk_evening_word_cloud, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Word cloud of GO terms detected in the evening cluster of JTK (cluster 1)"} -->
+<!-- wordcloud(words = nls_freqTable$word -->
+<!--           , freq = nls_freqTable$freq -->
+<!--           # , scale = c(8,15) -->
+<!--           , min.freq=1 -->
+<!--           # , max.words=max.words -->
+<!--           # , random.order=FALSE -->
+<!--           # , rot.per=0.35 -->
+<!--           , use.r.layout=FALSE -->
+<!--           # , colors=c(colorRampPalette(c("#e7f0fa", "#c9e2f6", "#95cbee", "#0099dc", "#4ab04a", "#ffd73e"))(10), -->
+<!--           #           colorRampPalette(c("#eec73a", "#e29421", "#e29421", "#f05336","#ce472e"), bias=2)(90)) -->
+<!--           , colors = rev(brewer.pal(8, "Spectral")) -->
+<!--           # , ordered.colors = T -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- After that, terms of NLS cluster 4 and JTK cluster 1 are merged and the wordcloud is colored by origin. -->
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- res <- rquery.wordcloud(c(nls_cluster_4$GO.Term,jtk_cluster_1$GO.Term), type ="text", lang = "english" -->
+<!--                         , textStemming = F -->
+<!--                         , colorPalette = "Spectral" -->
+<!--                         , max.words=200 -->
+<!--                         # , excludeWords = c("process") -->
+<!--                         , min.freq = 1) -->
+
+<!-- # See word counts -->
+<!-- tdm <- res$tdm -->
+<!-- all_freqTable <- res$freqTable -->
+
+<!-- # Words only in nls -->
+<!-- nls_word_list <- gsub(",", "", nls_go) -->
+<!-- nls_word_list <- unique(unlist(strsplit(nls_word_list, " "))) -->
+<!-- # Words only in jtk -->
+<!-- jtk_word_list <- gsub(",", "", jtk_go) -->
+<!-- jtk_word_list <- unique(unlist(strsplit(jtk_word_list, " "))) -->
+
+<!-- nls_only_words <- nls_word_list[which(nls_word_list %!in% jtk_word_list)] -->
+<!-- jtk_only_words <- jtk_word_list[which(jtk_word_list %!in% nls_word_list)] -->
+<!-- common_words <- nls_word_list[which(nls_word_list %in% jtk_word_list)] -->
+
+<!-- annotation <- all_freqTable -->
+<!-- annotation$alg <- "both" -->
+<!-- # Which words in the whole cloud come from NLS -->
+<!-- annotation$alg[which(annotation$word %in% nls_only_words)] <- "nls" -->
+<!-- annotation$alg[which(annotation$word %in% jtk_only_words)] <- "jtk" -->
+<!-- ``` -->
+
+
+<!-- ```{r both_evening_word_cloud, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Word cloud of the by NLS, JTK or both for their respective evening cluster (Cluster 4 for NLS and cluster 1 for JTK). Yellow words appared in both GO analyses, blue words appeared only in GO analysis of the NLS genes, and green words appeared only in the GO analysis of genes detected by JTK."} -->
+<!-- wordcloud(words = annotation$word -->
+<!--           , freq = annotation$freq -->
+<!--           # , scale = c(8,15) -->
+<!--           , min.freq=1 -->
+<!--           # , max.words=max.words -->
+<!--           , random.order=FALSE -->
+<!--           # , rot.per=0.35 -->
+<!--           , use.r.layout=FALSE -->
+<!--           , colors=c(revalue(annotation$alg, c(nls = "#2f5593", jtk = "#379122", both = "#afaf2b"))) -->
+<!--           , ordered.colors = T -->
+<!--           ) -->
+<!-- ``` -->
+
+<!-- Same as above, but taking the top 20 words of each algorithm (NLS, JTK or both). -->
+
+<!-- ```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Word cloud of the top 20 words detected by NLS, JTK or both for their respective evening cluster (Cluster 4 for NLS and cluster 1 for JTK). Yellow words appared in both GO analyses, blue words appeared only in GO analysis of the NLS genes, and green words appeared only in the GO analysis of genes detected by JTK."} -->
+<!-- top20 <- as.data.frame(annotation %>% group_by(alg) %>% top_n(20, freq)) #(dplyr) -->
+<!-- # top20$freq_log <- round(log2(top20$freq)) -->
+<!-- wordcloud(words = top20$word -->
+<!--           , freq = top20$freq -->
+<!--           # , scale = c(8,15) -->
+<!--           , min.freq=1 -->
+<!--           # , max.words=max.words -->
+<!--           , random.order=FALSE -->
+<!--           # , rot.per=0.35 -->
+<!--           , use.r.layout=FALSE -->
+<!--           , colors=c(revalue(top20$alg, c(nls = "#2f5593", jtk = "#379122", both = "#afaf2b"))) -->
+<!--           , ordered.colors = T -->
+<!--           ) -->
+<!-- ``` -->
+
+<!-- ### Comparison with other publications -->
+
+<!-- We compare our results with the circadian gene list from  (Table S1). -->
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- # library("xlsx") -->
+<!-- # fileName <- "/data3/arubio/projects/Andrea_Circadian_benchmark/DOC/RNAseq/Ruth_A._Akhtar_et_al_S1_1.xlsx" -->
+<!-- # # Read signatures -->
+<!-- # circ_Akhtar <- read.xlsx(fileName, sheetName = "Table 1", startRow = 3) -->
+
+<!-- circ_Akhtar <- read.csv("./DOC/RNAseq/S1_1.csv", skip=1) -->
+<!-- circ_Akhtar_annot <- merge(circ_Akhtar,t2g.annot, by.x="Symbol", by.y="ext_gene") -->
+<!-- ``` -->
+
+<!-- ```{r liver_rna_seq_venn_nls_akhtar, echo=FALSE, fig.height=3, fig.width=3, message=FALSE, warning=FALSE} -->
+<!-- intersection <- list(as.character(circ_Akhtar_annot$ens_gene) -->
+<!--                    , as.character(nls_genes_q$feature)) -->
+<!-- venn <- venn.diagram( intersection -->
+<!--               , filename = NULL -->
+<!--               , scale = F -->
+<!--               # , col = c("red", "blue") -->
+<!--               # , fill = c("red", "blue") -->
+<!--               , alpha = 0.3 -->
+<!--               , category.names = c("Akhtar","NLS") -->
+<!--               , cat.pos = c(0,0) -->
+<!--               , force.unique = TRUE -->
+<!--               , margin = 0.0 -->
+<!--               , scaled=T -->
+<!--               # , cex = 2 -->
+<!--               # , ext.text = FALSE -->
+<!--               # , main = "NLS detected genes" -->
+<!--               # , main.fontface = "bold" -->
+<!-- ) -->
+<!-- grid.draw(venn) -->
+<!-- ``` -->
+
+<!-- ### Comparison with CircaDB -->
+
+<!-- We compare our results with the circadian gene list from circaDB Mouse 1.OST liver Affymetrix, with a q.value <= 0.05 and a period between 20 and 30. -->
+
+<!-- ```{r message=FALSE, warning=FALSE, include=FALSE} -->
+<!-- # library("xlsx") -->
+<!-- # fileName <- "/data3/arubio/projects/Andrea_Circadian_benchmark/DOC/RNAseq/Ruth_A._Akhtar_et_al_S1_1.xlsx" -->
+<!-- # # Read signatures -->
+<!-- # circ_Akhtar <- read.xlsx(fileName, sheetName = "Table 1", startRow = 3) -->
+
+<!-- circ_DB <- read.csv("./DOC/RNAseq/jtk_q_Affy_liver_20_30.csv") -->
+<!-- circ_DB_annot <- merge(circ_Akhtar,t2g.annot, by.x="Symbol", by.y="ext_gene") -->
+<!-- ``` -->
+
+<!-- ```{r liver_rna_seq_venn_nls_circaDB, echo=FALSE, fig.height=3, fig.width=3, message=FALSE, warning=FALSE} -->
+<!-- intersection <- list(as.character(circ_DB_annot$ens_gene) -->
+<!--                    , as.character(nls_genes_q$feature)) -->
+<!-- venn <- venn.diagram( intersection -->
+<!--               , filename = NULL -->
+<!--               , scale = F -->
+<!--               # , col = c("red", "blue") -->
+<!--               # , fill = c("red", "blue") -->
+<!--               , alpha = 0.3 -->
+<!--               , category.names = c("CircaDB","NLS") -->
+<!--               , cat.pos = c(0,0) -->
+<!--               , force.unique = TRUE -->
+<!--               , margin = 0.0 -->
+<!--               , scaled=T -->
+<!--               # , cex = 2 -->
+<!--               # , ext.text = FALSE -->
+<!--               # , main = "NLS detected genes" -->
+<!--               # , main.fontface = "bold" -->
+<!-- ) -->
+<!-- grid.draw(venn) -->
+<!-- ``` -->
+

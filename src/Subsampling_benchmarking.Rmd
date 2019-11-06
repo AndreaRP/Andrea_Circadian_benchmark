@@ -1,0 +1,1978 @@
+---
+title: "Benchmarking of subsampled datasets using JTK, NLS and BC"
+author: "Andrea Rubio-Ponce"
+date: "`r format(Sys.time(), '%m, %Y')`"
+output: 
+  pdf_document: 
+    dev: pdf
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+documentclass: article
+urlcolor: blue
+classoption: a4paper
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{float}
+- \usepackage{longtable}
+---
+
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+# Functions, Constants and graphical variables      
+knitr::opts_knit$set(root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/")
+require("knitr")
+knitr::opts_chunk$set(
+    	fig.align = "center",
+    	fig.path = "/data3/arubio/projects/Andrea_Circadian_benchmark/RESULTS/Subsampling/plots/",
+    	fig.pos = "H",
+    	message = FALSE,
+    	warning = FALSE,
+    	dev = c("png", "pdf"),
+    	dpi = 500,
+    	# include = FALSE,
+    	root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/"
+      )
+setwd("/data3/arubio/projects/Andrea_Circadian_benchmark/")
+knitr::opts_knit$get("root.dir")
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+library("RColorBrewer")
+library("pheatmap")
+library("ggplot2")
+library("gplots")
+library("NMF")
+library("cluster")
+library("fpc")
+library("plyr")
+library("VennDiagram")
+library("knitr")
+library("xtable")
+library("knitcitations")
+library("dplyr")
+library("reshape2")
+library("AnnotationDbi")
+library("mouse4302.db")
+library("affy")
+library("broom")
+library("nlme")
+library("panp")
+library("MetaCycle")
+library("cowplot")
+source("./SW/JTKversion3/JTK_CYCLEv3.1.R")
+source("./SRC/Regression_lib.R")
+source("./SRC/Utils.R")
+
+# dir.create("./RESULTS/NLS_benchmarking/Hughes/files/", recursive = T)
+dir.create("./RESULTS/Subsampling/files/", recursive=T)
+dir.create("./RAW/Subsampling/", recursive=T)
+cite_options(citation_format = "compatibility",
+hyperlink = FALSE, cite.style = "authoryear", super = FALSE,
+max.names = 1, longnamesfirst = FALSE, check.entries = FALSE)
+```
+
+
+# Description
+
+We create a single dataframe of 48x1 in silico. An 80% of the genes are generated using the madsim package `r sanitize(citep(citation("madsim")))`. The other 20% were generated using random periods (8:30), amplitudes (0.5:4) and phases (-6:6) and adding normal noise and a SD = 1.5.
+With that dataframe, different subsamling is done to recreate several experiment configurations.
+Number of replicates: 1, 3 and 5
+Experimental design: 24h and 48h long with 1,2,3,4, and 6h between timepoints.
+To see how well every algorithm does with different frequencies and amplitudes, the genes considered "true" were divided into categories:
+All rythmic genes: all amps, per 8:30
+Ultradian genes: all amps, per 8:19
+Circadian genes: all amps, per 20:30
+Low genes: amp 0:1.5, all pers
+High genes: amp 1.5: , all pers
+
+A gene is considered "positive" if it passes the threshold of significance and the estimated period or amplitude is in the range of the true gene (per = 8:19 for ultradian genes and so on).
+
+
+# Analysis
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Generate data
+if(!file.exists("./RAW/Subsampling/subsampling_in_silico_data.csv")){
+full_exprs <- gen_samples(total_genes = 18800, duration = 48
+                              , interval = 1, per_circ_genes = 0.2
+                              , n_replicates = 5, sdev = 1.5, rseed = 10)
+write.csv(full_exprs, "./RAW/Subsampling/subsampling_in_silico_data.csv")
+write.table(full_exprs[, grep("rep", colnames(exprs))]
+            , file="./RAW/Subsampling/subsampling_in_silico_data.tsv"
+            , quote=FALSE, sep='\t', row.names=T, col.names=NA)
+# exprs$X <- rownames(exprs)
+}else{
+  full_exprs <- read.csv("./RAW/Subsampling/subsampling_in_silico_data.csv", row.names=1)
+}
+# We will store the performance of NLS with each dataset
+results <- setNames(data.frame(matrix(ncol = 6, nrow = 0))
+                 , c("Dataset","Algorithm", "reps", "TP.q", "FP.q", "FN.q"))
+
+# Get real genes
+real_genes <- full_exprs[which(!is.na(full_exprs$per)),]
+real_negat <- full_exprs[which(is.na(full_exprs$per)),]
+# For per 8:19 (ultradian)
+real_u_genes <- full_exprs[which(full_exprs$per>=8 & full_exprs$per <20),]
+real_u_negat <- full_exprs[which(rownames(full_exprs) %!in% rownames(real_u_genes)),]
+# For per 20:30 (circadian) (1720 genes)
+real_c_genes <- full_exprs[which(full_exprs$per>=20 & full_exprs$per <=30),]
+real_c_negat <- full_exprs[which(rownames(full_exprs) %!in% rownames(real_c_genes)),]
+# For amp 0.5:1.5 (low)
+real_l_genes <- full_exprs[which(full_exprs$amp>=0 & full_exprs$amp <1.5),]
+real_l_negat <- full_exprs[which(rownames(full_exprs) %!in% rownames(real_l_genes)),]
+# For amp 1.5:4 (high)
+real_h_genes <- full_exprs[which(full_exprs$amp>=1.5),]
+real_h_negat <- full_exprs[which(rownames(full_exprs) %!in% rownames(real_h_genes)),]
+```
+
+
+## Subsampling
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# samplings to test
+sampling <- c(1,2,3,4,6)
+lengths <- c(24, 48)
+reps <- c(1,2,3,4,5)
+
+if (!file.exists("./RESULTS/Subsampling/files/subsampling_results_file_new.csv")){
+  for (nreps in reps){
+    # Select number of reps
+    reps_to_subset <- paste(paste("rep", c(1:nreps), sep=""), collapse='|')
+    exprs <- full_exprs[,grep(reps_to_subset, colnames(full_exprs), value=T)]
+    # Generate s2c
+    times <- colnames_array <- grep("rep", colnames(exprs), value=T)
+    colnames(exprs) <- gsub("_", "", colnames(exprs))
+    colnames_array <- grep("rep", colnames(exprs), value=T)
+    s2c <- data.frame(sample=colnames_array
+                     , time=gsub("[S\\_]", "", regmatches(times, gregexpr("S.*?\\_", times)))
+                     , ind=rep(c(1:nreps),length.out=length(colnames_array))
+                     , stringsAsFactors = F
+    )
+  
+    for (l in lengths){
+      for (s in sampling){
+        # Select which timepoints we are going to test
+        timepoints <- seq(1, l, s)
+        # Generate dataset with the selected timepoints to use in the software
+        samples_to_subset <-  paste(paste("S",timepoints, "rep", sep=""), collapse='|')
+        subsampled_exprs <- as.data.frame(exprs[,grep(samples_to_subset, colnames(exprs), value=T)])
+        # Generate s2c to match data
+        subsampled_s2c <- s2c[which(s2c$sample %in% colnames(subsampled_exprs)),]
+        #################################### NLS #################################### 
+        if (!file.exists(paste("./RESULTS/Subsampling/files/subsampling_NLS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))){
+          nls_results <- nls_test(subsampled_exprs, subsampled_s2c)
+          write.csv(nls_results, paste("./RESULTS/Subsampling/files/subsampling_NLS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+        }else{
+          nls_results <- read.csv(paste("./RESULTS/Subsampling/files/subsampling_NLS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+        }
+        # Get detected genes (all)
+        detected_genes <- nls_results[which((nls_results$BH.q.value.per<0.05 | is.na(nls_results$BH.q.value.per)) &
+                                            nls_results$r>=0.7 &
+                                            nls_results$BH.q.value.amp<0.05
+                                           ),]
+
+        df <- statistics_calc(detected_genes$feature, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "NLS_all"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get detected genes (ultradian)
+        detected_genes <- nls_results[which(nls_results$estimate.per<20 &
+                                            nls_results$estimate.per>=8 &
+                                           (nls_results$BH.q.value.per<0.05 | is.na(nls_results$BH.q.value.per)) &
+                                            nls_results$r>=0.7 &
+                                            nls_results$BH.q.value.amp<0.05
+                                           ),]
+
+        df <- statistics_calc(detected_genes$feature, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "NLS_u"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get detected genes (circadian)
+        detected_genes <- nls_results[which(nls_results$estimate.per<=30 &
+                                            nls_results$estimate.per>=20 &
+                                           (nls_results$BH.q.value.per<0.05 | is.na(nls_results$BH.q.value.per)) &
+                                            nls_results$r>=0.7 &
+                                            nls_results$BH.q.value.amp<0.05
+                                           ),]
+        nls_genes <- as.character(detected_genes$feature)
+        df <- statistics_calc(detected_genes$feature, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "NLS_c"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get detected genes (low)
+        detected_genes <- nls_results[which(nls_results$estimate.amp<1.5 &
+                                            nls_results$estimate.amp>0 &
+                                           (nls_results$BH.q.value.per<0.05 | is.na(nls_results$BH.q.value.per)) &
+                                            nls_results$r>=0.7 &
+                                            nls_results$BH.q.value.amp<0.05
+                                           ),]
+
+        df <- statistics_calc(detected_genes$feature, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "NLS_l"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get detected genes (high)
+        detected_genes <- nls_results[which(nls_results$estimate.amp>=1.5 &
+                                           (nls_results$BH.q.value.per<0.05 | is.na(nls_results$BH.q.value.per)) &
+                                            nls_results$r>=0.7 &
+                                            nls_results$BH.q.value.amp<0.05
+                                           ),]
+
+        df <- statistics_calc(detected_genes$feature, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "NLS_h"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        
+        #################################### JTK #################################### 
+        if (!file.exists(paste("./RESULTS/Subsampling/files/subsampling_JTK_",l,"_",s,"_", nreps,"_reps.csv", sep=""))){
+          jtk_results <- jtk_test(subsampled_exprs, subsampled_s2c)
+          write.csv(jtk_results, paste("./RESULTS/Subsampling/files/subsampling_JTK_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+        }else{
+          jtk_results <- read.csv(paste("./RESULTS/Subsampling/files/subsampling_JTK_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+        }
+        # Get detected genes
+        detected_genes_q <- jtk_results[which(jtk_results$BH.Q < 0.05 ),]
+        detected_genes_p <- jtk_results[which(jtk_results$ADJ.P < 0.05 ),]
+
+        df <- statistics_calc(detected_genes_q$Probeset, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_all_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$Probeset, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_all_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+
+        # Get ultradian
+        detected_genes_q <- jtk_results[which(jtk_results$BH.Q < 0.05 & jtk_results$PER>=8 & jtk_results$PER <20),]
+        detected_genes_p <- jtk_results[which(jtk_results$ADJ.P < 0.05 & jtk_results$PER>=8 & jtk_results$PER <20),]
+        df <- statistics_calc(detected_genes_q$Probeset, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_u_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$Probeset, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_u_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get circadian
+        detected_genes_q <- jtk_results[which(jtk_results$BH.Q<0.05 & jtk_results$PER>=20 & jtk_results$PER<=30),]
+        jtk_genes <- c(detected_genes_q$Probeset)
+        detected_genes_p <- jtk_results[which(jtk_results$ADJ.P<0.05 & jtk_results$PER>=20 & jtk_results$PER<=30),]
+        df <- statistics_calc(detected_genes_q$Probeset, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_c_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$Probeset, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_c_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get low
+        detected_genes_q <- jtk_results[which(jtk_results$BH.Q<0.05 & jtk_results$AMP<1.5 & jtk_results$AMP>0),]
+        detected_genes_p <- jtk_results[which(jtk_results$ADJ.P<0.05 & jtk_results$AMP<1.5 & jtk_results$AMP>0),]
+        df <- statistics_calc(detected_genes_q$Probeset, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_l_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$Probeset, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_l_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get high
+        detected_genes_q <- jtk_results[which(jtk_results$BH.Q<0.05 & jtk_results$AMP>=1.5),]
+        detected_genes_p <- jtk_results[which(jtk_results$ADJ.P<0.05 & jtk_results$AMP>=1.5),]
+        df <- statistics_calc(detected_genes_q$Probeset, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_h_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$Probeset, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "JTK_h_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        #################################### JTK+NLS ##############################
+        # Elliminate de dups in the detected genes
+        jtk_nls_intersec <- intersect(jtk_genes,nls_genes)
+        df <- statistics_calc(jtk_nls_intersec, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "Intersec_c_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        jtk_nls_union <- as.character(unique(c(jtk_genes, nls_genes)))
+        df <- statistics_calc(jtk_nls_union, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "Union_c_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        #################################### BC #################################### 
+        if (!file.exists(paste("./RESULTS/Subsampling/files/subsampling_BC_",l,"_",s,"_", nreps,"_reps.csv", sep=""))){
+          write.table(subsampled_exprs
+                    , file=paste("./RAW/Subsampling/temp_",l,"x", s,".tsv",sep="")
+                    , quote=FALSE, sep='\t', row.names=T, col.names=NA)
+          command <- paste("bash SW/BioCycle_run.sh -i '",paste("./RAW/Subsampling/temp_",l,"x", s,".tsv", sep="")
+                           ,"' -o './RESULTS/Subsampling/files/' -s 8 -e 30", sep="")
+          system(command)
+          file.remove(paste("./RAW/Subsampling/temp_",l,"x", s,".tsv",sep=""))
+          file.rename(paste("./RESULTS/Subsampling/files/BC_temp_", l, "x", s, "_results.csv", sep="")
+                    , paste("./RESULTS/Subsampling/files/subsampling_BC_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+          bc_results <- read.csv(paste("./RESULTS/Subsampling/files/subsampling_BC_",l,"_",s,"_", nreps,"_reps.csv", sep=""), sep="\t")
+        }else{
+          bc_results <- read.csv(paste("./RESULTS/Subsampling/files/subsampling_BC_",l,"_",s,"_", nreps,"_reps.csv", sep=""), sep="\t")
+        }
+        # Select genes
+        detected_genes_q <- bc_results[which(bc_results$Q_VALUE < 0.05 ),]
+        detected_genes_p <- bc_results[which(bc_results$P_VALUE < 0.05 ),]
+        df <- statistics_calc(detected_genes_q$ID, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_all_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$ID, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_all_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # get ultradian
+        detected_genes_q <- bc_results[which(bc_results$Q_VALUE < 0.05 & bc_results$PERIOD>=8 & bc_results$PERIOD <20),]
+        detected_genes_p <- bc_results[which(bc_results$P_VALUE < 0.05 & bc_results$PERIOD>=8 & bc_results$PERIOD <20),]
+        df <- statistics_calc(detected_genes_q$ID, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_u_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$ID, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_u_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get circadian
+        detected_genes_q <- bc_results[which(bc_results$Q_VALUE < 0.05 & bc_results$PERIOD>=20 & bc_results$PERIOD <=30),]
+        detected_genes_p <- bc_results[which(bc_results$P_VALUE < 0.05 & bc_results$PERIOD>=20 & bc_results$PERIOD <=30),]
+        df <- statistics_calc(detected_genes_q$ID, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_c_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$ID, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_c_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+  
+        # Get low
+        detected_genes_q <- bc_results[which(bc_results$Q_VALUE < 0.05 & jtk_results$AMPLITUDE<1.5 & jtk_results$AMPLITUDE>0),]
+        detected_genes_p <- bc_results[which(bc_results$P_VALUE < 0.05 & jtk_results$AMPLITUDE<1.5 & jtk_results$AMPLITUDE>0),]
+            df <- statistics_calc(detected_genes_q$ID, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_l_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$ID, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_l_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get high
+        detected_genes_q <- bc_results[which(bc_results$Q_VALUE < 0.05 & jtk_results$AMP>=1.5),]
+        detected_genes_p <- bc_results[which(bc_results$P_VALUE < 0.05 & jtk_results$AMP>=1.5),]
+            df <- statistics_calc(detected_genes_q$ID, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_h_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$ID, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "BC_h_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        
+        #################################### LS ####################################
+        if (!file.exists(paste("./RESULTS/Subsampling/files/subsampling_LS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))){
+          ls_results <- ls_test(subsampled_exprs, subsampled_s2c)
+          write.csv(ls_results, paste("./RESULTS/Subsampling/files/subsampling_LS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+        }else{
+          ls_results <- read.csv(paste("./RESULTS/Subsampling/files/subsampling_LS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+        }
+        # Select genes
+        detected_genes_q <- ls_results[which(ls_results$LS_BH.Q < 0.05 ),]
+        detected_genes_p <- ls_results[which(ls_results$LS_pvalue < 0.05 ),]
+        df <- statistics_calc(detected_genes_q$CycID, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_all_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_all_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # get ultradian
+        detected_genes_q <- ls_results[which(ls_results$LS_BH.Q < 0.05 & ls_results$Period>=8 & ls_results$Period <20),]
+        detected_genes_p <- ls_results[which(ls_results$LS_pvalue < 0.05 & ls_results$Period>=8 & ls_results$Period <20),]
+        df <- statistics_calc(detected_genes_q$CycID, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_u_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_u_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get circadian
+        detected_genes_q <- ls_results[which(ls_results$LS_BH.Q < 0.05 & ls_results$Period>=20 & ls_results$Period <=30),]
+        detected_genes_p <- ls_results[which(ls_results$LS_pvalue < 0.05 & ls_results$Period>=20 & ls_results$Period <=30),]
+        df <- statistics_calc(detected_genes_q$CycID, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_c_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_c_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+  
+        # Get low
+        detected_genes_q <- ls_results[which(ls_results$LS_BH.Q < 0.05 & ls_results$PeakSPD<1.5 & ls_results$PeakSPD>0),]
+        detected_genes_p <- ls_results[which(ls_results$LS_pvalue < 0.05 & ls_results$PeakSPD<1.5 & ls_results$PeakSPD>0),]
+            df <- statistics_calc(detected_genes_q$CycID, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_l_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_l_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get high
+        detected_genes_q <- ls_results[which(ls_results$LS_BH.Q < 0.05 & ls_results$AMP>=1.5),]
+        detected_genes_p <- ls_results[which(ls_results$LS_pvalue < 0.05 & ls_results$AMP>=1.5),]
+            df <- statistics_calc(detected_genes_q$CycID, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_h_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "LS_h_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        #################################### ARS ####################################
+        if (!file.exists(paste("./RESULTS/Subsampling/files/subsampling_ARS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))){
+          ars_results <- ars_test(subsampled_exprs, subsampled_s2c)
+          write.csv(ars_results, paste("./RESULTS/Subsampling/files/subsampling_ARS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+        }else{
+          ars_results <- read.csv(paste("./RESULTS/Subsampling/files/subsampling_ARS_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+        }
+        # Select genes
+        detected_genes_q <- ars_results[which(ars_results$meta3d_BH.Q < 0.05 ),]
+        detected_genes_p <- ars_results[which(ars_results$meta3d_Pvalue < 0.05 ),]
+        df <- statistics_calc(detected_genes_q$CycID, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_all_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_genes), rownames(real_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_all_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # get ultradian
+        detected_genes_q <- ars_results[which(ars_results$meta3d_BH.Q < 0.05 & 
+                                                ars_results$meta3d_Period>=8 & 
+                                                ars_results$meta3d_Period <20),]
+        detected_genes_p <- ars_results[which(ars_results$meta3d_Pvalue < 0.05 & 
+                                                ars_results$meta3d_Period>=8 & 
+                                                ars_results$meta3d_Period <20),]
+        df <- statistics_calc(detected_genes_q$CycID, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_u_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_u_genes), rownames(real_u_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_u_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get circadian
+        detected_genes_q <- ars_results[which(ars_results$meta3d_BH.Q < 0.05 & 
+                                                ars_results$meta3d_Period>=20 & 
+                                                ars_results$meta3d_Period <=30),]
+        detected_genes_p <- ars_results[which(ars_results$meta3d_Pvalue < 0.05 & 
+                                                ars_results$meta3d_Period>=20 & 
+                                                ars_results$meta3d_Period <=30),]
+        df <- statistics_calc(detected_genes_q$CycID, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_c_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_c_genes), rownames(real_c_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_c_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+  
+        # Get low
+        detected_genes_q <- ars_results[which(ars_results$meta3d_BH.Q < 0.05 & 
+                                                ars_results$meta3d_AMP<1.5 & 
+                                                ars_results$meta3d_AMP>0),]
+        detected_genes_p <- ars_results[which(ars_results$meta3d_Pvalue < 0.05 & 
+                                                ars_results$meta3d_AMP<1.5 & 
+                                                ars_results$meta3d_AMP>0),]
+            df <- statistics_calc(detected_genes_q$CycID, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_l_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_l_genes), rownames(real_l_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_l_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        # Get high
+        detected_genes_q <- ars_results[which(ars_results$meta3d_BH.Q < 0.05 & ars_results$AMP>=1.5),]
+        detected_genes_p <- ars_results[which(ars_results$meta3d_Pvalue < 0.05 & ars_results$AMP>=1.5),]
+            df <- statistics_calc(detected_genes_q$CycID, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_h_q"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+        df <- statistics_calc(detected_genes_p$CycID, rownames(real_h_genes), rownames(real_h_negat))
+        results[nrow(results)+1,] <-  c(paste(l,"x",s, sep="")
+                                 , "ARS_h_p"
+                                 , nreps
+                                 , as.numeric(df["tp",])
+                                 , as.numeric(df["fp",])
+                                 , as.numeric(df["fn",])
+                                 )
+      }
+    }
+  }
+  write.csv(results, "./RESULTS/Subsampling/files/subsampling_results_file_new.csv")
+}else{
+  results <- read.csv("./RESULTS/Subsampling/files/subsampling_results_file_new.csv", row.names = 1)
+}
+```
+
+# Results
+
+## Discovery rate
+
+The results are in [subsampling_results_file.csv](./RESULTS/Subsampling/files/subsampling_results_file.csv)
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Calculate % of fp (of total genes detected), tp, fn (of total real genes)
+results[, 4:6] <- sapply(results[, 4:6], as.numeric)
+results$TP_per <- results$TP.q/(results$TP.q+results$FP.q)*100
+results$FP_per <- results$FP.q/(results$TP.q+results$FP.q)*100
+results$FN_per <- results$FN.q/(results$TP.q+results$FN.q)*100
+results <- results[order(results$Algorithm),]
+```
+
+
+```{r subsampling_results_table, eval=FALSE, fig.cap="Algorithm results for each experiment design.", message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE, results="asis"}
+newobject <- xtable(results
+                    , caption ="Algorithm results for each experiment design.")
+align(newobject) <- "|rrr|llllll|"
+print.xtable(newobject
+             , type = "latex"
+             , comment = F
+             , floating = getOption("xtable.floating", FALSE)
+             , row.names = F
+             , tabular.environment="longtable")
+```
+
+### 1 rep
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+results_1reps <- subset(results[which(results$reps==1),], select=-c(reps))
+data.long.results <- melt(results_1reps[,c("FN.q","TP.q", "FP.q", "Dataset", "Algorithm")], value.name="freq", variable.name = "measure", id.vars=c("Dataset", "Algorithm"))
+```
+
+
+```{r subsampling_1rep_statistics_bars_all, echo=FALSE, fig.cap="Comparison of all algorithms by sampling", message=FALSE, warning=FALSE}
+data.all <- data.long.results
+# data.all$measure <- factor(data.all$measure,levels(data.all$measure)[c(3,1,2)])
+data.all$measure <- factor(data.all$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_1rep_statistics_bars_NLS, echo=FALSE, fig.cap="Comparison of NLS by sampling", message=FALSE, warning=FALSE}
+data.nls <- data.long.results[which(data.long.results$Algorithm %in% grep("NLS", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.nls$measure <- factor(data.nls$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.nls,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_1rep_union_c_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.u <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c", "Union_c_q", "Intersec_c_q")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u$measure <- factor(data.u$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_1rep_statistics_bars_all_genes, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("all", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes$measure <- factor(data.all.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_1rep_statistics_bars_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_all_q", "LS_all_q","BC_all_q", "JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes.q$measure <- factor(data.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_1rep_statistics_bars_jtk_nls_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.jtk.nls.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.all.genes.q$measure <- factor(data.jtk.nls.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_1rep_statistics_bars_circ_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_c", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes$measure <- factor(data.c.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+
+```{r subsampling_1rep_statistics_bars_c_genes_qval, echo=FALSE, fig.cap="Comparison of circadian genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_c_q", "LS_c_q","BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes.q$measure <- factor(data.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_1rep_statistics_bars_jtk_nls_c_genes_qval, echo=FALSE, fig.cap="Comparison of circadian genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.jtk.nls.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.c.genes.q$measure <- factor(data.jtk.nls.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_1rep_statistics_bars_circ_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes.q$measure <- factor(data.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_statistics_bars_ultra_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_u", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes$measure <- factor(data.u.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_1rep_statistics_bars_ultra_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("BC_u_q", "JTK_u_q", "NLS_u")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes.q$measure <- factor(data.u.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+### 2 reps
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+results_2reps <- subset(results[which(results$reps==2),], select=-c(reps))
+data.long.results <- melt(results_2reps[,c("FN.q","TP.q", "FP.q", "Dataset", "Algorithm")], value.name="freq", variable.name = "measure", id.vars=c("Dataset", "Algorithm"))
+```
+
+
+```{r subsampling_2rep_24_4_all_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.24.4 <- data.long.results[which(data.long.results$Dataset == "24x4" & data.long.results$Algorithm %in% c("ARS_c_q", "LS_c_q","BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.24.4$measure <- factor(data.24.4$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.24.4, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) #+
+  # facet_wrap(~Algorithm,nrow=2)
+```
+
+```{r subsampling_2rep_union_c_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.u <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c", "Union_c_q", "Intersec_c_q")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u$measure <- factor(data.u$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_2rep_nls_jtk_c_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.u <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u$measure <- factor(data.u$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_2rep_statistics_bars_all, echo=FALSE, fig.cap="Comparison of all algorithms by sampling", message=FALSE, warning=FALSE}
+data.all <- data.long.results
+# data.all$measure <- factor(data.all$measure,levels(data.all$measure)[c(3,1,2)])
+data.all$measure <- factor(data.all$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_2rep_statistics_bars_NLS, echo=FALSE, fig.cap="Comparison of NLS by sampling", message=FALSE, warning=FALSE}
+data.nls <- data.long.results[which(data.long.results$Algorithm %in% grep("NLS", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.nls$measure <- factor(data.nls$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.nls,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_2rep_statistics_bars_all_genes, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("all", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes$measure <- factor(data.all.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_2rep_statistics_bars_all_q_genes, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("all", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes$measure <- factor(data.all.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_2rep_statistics_bars_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_all_q", "LS_all_q","BC_all_q", "JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes.q$measure <- factor(data.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+```{r subsampling_2rep_statistics_bars_jtk_nls_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.jtk.nls.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.all.genes.q$measure <- factor(data.jtk.nls.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_2rep_statistics_bars_circ_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_c", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes$measure <- factor(data.c.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_2rep_statistics_bars_jtk_nls_c_genes_qval, echo=FALSE, fig.cap="Comparison of circadian genes detected by NLS and JTK.", message=FALSE, warning=FALSE}
+data.jtk.nls.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.c.genes.q$measure <- factor(data.jtk.nls.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_2rep_statistics_bars_circ_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_c_q", "LS_c_q","BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes.q$measure <- factor(data.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_2rep_statistics_bars_ultra_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_u", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes$measure <- factor(data.u.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_2rep_statistics_bars_ultra_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("BC_u_q", "JTK_u_q", "NLS_u")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes.q$measure <- factor(data.u.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+### 3 reps
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+results_3reps <- subset(results[which(results$reps==3),], select=-c(reps))
+data.long.results <- melt(results_3reps[,c("FN.q","TP.q", "FP.q", "Dataset", "Algorithm")], value.name="freq", variable.name = "measure", id.vars=c("Dataset", "Algorithm"))
+```
+
+
+```{r subsampling_3rep_24_4_all_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.24.4 <- data.long.results[which(data.long.results$Dataset == "24x4" & data.long.results$Algorithm %in% c("ARS_c_q", "LS_c_q","BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.24.4$measure <- factor(data.24.4$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.24.4, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) #+
+  # facet_wrap(~Algorithm,nrow=2)
+```
+
+```{r subsampling_3rep_union_c_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.u <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c", "Union_c_q", "Intersec_c_q")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u$measure <- factor(data.u$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_3rep_nls_jtk_c_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.u <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u$measure <- factor(data.u$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_3rep_statistics_bars_all, echo=FALSE, fig.cap="Comparison of all algorithms by sampling", message=FALSE, warning=FALSE}
+data.all <- data.long.results
+# data.all$measure <- factor(data.all$measure,levels(data.all$measure)[c(3,1,2)])
+data.all$measure <- factor(data.all$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_3rep_statistics_bars_NLS, echo=FALSE, fig.cap="Comparison of NLS by sampling", message=FALSE, warning=FALSE}
+data.nls <- data.long.results[which(data.long.results$Algorithm %in% grep("NLS", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.nls$measure <- factor(data.nls$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.nls,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_3rep_statistics_bars_all_genes, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("all", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes$measure <- factor(data.all.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_3rep_statistics_bars_all_q_genes, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("all", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes$measure <- factor(data.all.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_3rep_statistics_bars_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_all_q", "LS_all_q","BC_all_q", "JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes.q$measure <- factor(data.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+```{r subsampling_3rep_statistics_bars_jtk_nls_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.jtk.nls.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.all.genes.q$measure <- factor(data.jtk.nls.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_3rep_statistics_bars_circ_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_c", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes$measure <- factor(data.c.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_3rep_statistics_bars_jtk_nls_c_genes_qval, echo=FALSE, fig.cap="Comparison of circadian genes detected by NLS and JTK.", message=FALSE, warning=FALSE}
+data.jtk.nls.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.c.genes.q$measure <- factor(data.jtk.nls.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_3rep_statistics_bars_circ_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_c_q", "LS_c_q","BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes.q$measure <- factor(data.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_3rep_statistics_bars_ultra_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_u", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes$measure <- factor(data.u.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_3rep_statistics_bars_ultra_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("BC_u_q", "JTK_u_q", "NLS_u")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes.q$measure <- factor(data.u.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+
+
+
+### 4 reps
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+results_4reps <- subset(results[which(results$reps==4),], select=-c(reps))
+data.long.results <- melt(results_4reps[,c("FN.q","TP.q", "FP.q", "Dataset", "Algorithm")], value.name="freq", variable.name = "measure", id.vars=c("Dataset", "Algorithm"))
+```
+
+
+```{r subsampling_4rep_statistics_bars_all, echo=FALSE, fig.cap="Comparison of all algorithms by sampling", message=FALSE, warning=FALSE}
+data.all <- data.long.results
+data.all$measure <- factor(data.all$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_4rep_statistics_bars_NLS, echo=FALSE, fig.cap="Comparison of NLS by sampling", message=FALSE, warning=FALSE}
+data.nls <- data.long.results[which(data.long.results$Algorithm %in% grep("NLS", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.nls$measure <- factor(data.nls$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.nls,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_4rep_union_c_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.u <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c", "Union_c_q", "Intersec_c_q")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u$measure <- factor(data.u$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_4rep_statistics_bars_all_genes, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("all", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes$measure <- factor(data.all.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_4rep_statistics_bars_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_all_q", "LS_all_q","BC_all_q", "JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes.q$measure <- factor(data.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+```{r subsampling_4rep_statistics_bars_jtk_nls_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.jtk.nls.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.all.genes.q$measure <- factor(data.jtk.nls.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_4rep_statistics_bars_circ_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_c", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes$measure <- factor(data.c.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_4rep_statistics_bars_c_genes_qval, echo=FALSE, fig.cap="Comparison of circadian genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_c_q", "LS_c_q","BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes.q$measure <- factor(data.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_4rep_statistics_bars_jtk_nls_c_genes_qval, echo=FALSE, fig.cap="Comparison of circadian genes detected by NLS and JTK.", message=FALSE, warning=FALSE}
+data.jtk.nls.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.c.genes.q$measure <- factor(data.jtk.nls.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_4rep_statistics_bars_circ_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes.q$measure <- factor(data.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_4rep_statistics_bars_ultra_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_u", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes$measure <- factor(data.u.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_4rep_statistics_bars_ultra_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("BC_u_q", "JTK_u_q", "NLS_u")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes.q$measure <- factor(data.u.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+### 5 reps
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+results_3reps <- subset(results[which(results$reps==5),], select=-c(reps))
+data.long.results <- melt(results_3reps[,c("FN.q","TP.q", "FP.q", "Dataset", "Algorithm")], value.name="freq", variable.name = "measure", id.vars=c("Dataset", "Algorithm"))
+```
+
+
+```{r subsampling_5rep_statistics_bars_all, echo=FALSE, fig.cap="Comparison of all algorithms by sampling", message=FALSE, warning=FALSE}
+data.all <- data.long.results
+data.all$measure <- factor(data.all$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_5rep_statistics_bars_NLS, echo=FALSE, fig.cap="Comparison of NLS by sampling", message=FALSE, warning=FALSE}
+data.nls <- data.long.results[which(data.long.results$Algorithm %in% grep("NLS", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.nls$measure <- factor(data.nls$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.nls,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_5rep_statistics_bars_all_genes, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("all", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes$measure <- factor(data.all.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_5rep_union_c_comparison_qval, echo=FALSE, message=FALSE, warning=FALSE}
+data.u <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c", "Union_c_q", "Intersec_c_q")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u$measure <- factor(data.u$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u, aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_5rep_statistics_bars_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_all_q", "LS_all_q","BC_all_q", "JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.all.genes.q$measure <- factor(data.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+```{r subsampling_5rep_statistics_bars_jtk_nls_all_genes_qval, echo=FALSE, fig.cap="Comparison of oscillating genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.jtk.nls.all.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_all_q", "NLS_all")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.all.genes.q$measure <- factor(data.jtk.nls.all.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.all.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_5rep_statistics_bars_circ_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_c", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes$measure <- factor(data.c.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_5rep_statistics_bars_c_genes_qval, echo=FALSE, fig.cap="Comparison of circadian genes detected by all algorithms.", message=FALSE, warning=FALSE}
+data.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("ARS_c_q", "LS_c_q","BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes.q$measure <- factor(data.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_5rep_statistics_bars_jtk_nls_c_genes_qval, echo=FALSE, fig.cap="Comparison of circadian genes detected by NLS and JTK.", message=FALSE, warning=FALSE}
+data.jtk.nls.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.jtk.nls.c.genes.q$measure <- factor(data.jtk.nls.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.jtk.nls.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+```{r subsampling_5rep_statistics_bars_circ_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.c.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("BC_c_q", "JTK_c_q", "NLS_c")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.c.genes.q$measure <- factor(data.c.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.c.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_5rep_statistics_bars_ultra_genes, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes <- data.long.results[which(data.long.results$Algorithm %in% grep("_u", data.long.results$Algorithm, value=T)),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes$measure <- factor(data.u.genes$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+```{r subsampling_5rep_statistics_bars_ultra_genes_qval, echo=FALSE, fig.cap="Comparison of NLS.", message=FALSE, warning=FALSE}
+data.u.genes.q <- data.long.results[which(data.long.results$Algorithm %in% c("BC_u_q", "JTK_u_q", "NLS_u")),]
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.u.genes.q$measure <- factor(data.u.genes.q$measure, levels=c("FP.q", "FN.q", "TP.q"))
+ggplot(data.u.genes.q,aes(y = freq, x = Algorithm, fill = measure))+
+  geom_bar(stat = "identity",color="white")+
+  scale_fill_manual(name = "Total hits"
+                   , values = c("firebrick4", "gray63" , "deepskyblue3")
+                   # , labels = c("False Positives", "False Negatives", "True Positives")
+                   ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  facet_wrap(~Dataset,nrow=2)
+```
+
+
+
+## ROC Curves
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+full_exprs <- read.csv("./RAW/Subsampling/subsampling_in_silico_data.csv", row.names=1)
+# Get real genes
+real_c_genes <- full_exprs[which(full_exprs$per>=20 & full_exprs$per <=30),]
+real_c_negat <- full_exprs[which(rownames(full_exprs) %!in% rownames(real_c_genes)),]
+if(!file.exists("./RESULTS/Subsampling/files/roc_results_alt.csv")){
+  roc.data <- setNames(data.frame(matrix(ncol = 8, nrow = 0))
+                     , c("Dataset","Algorithm", "threshold", "Reps","TP", "FP", "FN", "TN"))
+  algorithms <- c("JTK", "NLS")
+  sequence <- round(seq(from = 0, to = 1, length.out = 1000),digits=3)
+  for (nreps in reps){
+    for (l in lengths){
+      for (s in sampling){
+        for (a in algorithms){
+          # getwd()
+            a_results <- read.csv(paste("./RESULTS/Subsampling/files/subsampling_"
+                                        ,a,"_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+            cat("Calculating for:",nreps, "reps, ",l, "hours long,",s, "h interval and",a,"\n")
+            for (i in sequence){
+              if(a=="JTK"){
+                results_roc <- a_results[which(a_results$BH.Q<i & a_results$PER>=20 & a_results$PER<=30),]
+                detected <- results_roc$Probeset
+              }else{
+                results_roc <- a_results[which(a_results$estimate.per<=30 &
+                                            a_results$estimate.per>=20 &
+                                           (a_results$BH.q.value.per<i | is.na(a_results$BH.q.value.per)) &
+                                            a_results$r>=0.7 &
+                                            a_results$BH.q.value.amp<i
+                                           ),]
+                detected <- results_roc$feature
+              }
+                tp <-  Reduce(intersect, list(rownames(real_c_genes),detected))
+                fp <- detected[detected %!in% rownames(real_c_genes)]
+                fn <- rownames(real_c_genes)[rownames(real_c_genes) %!in% detected]
+                tn <- rownames(real_c_negat)[rownames(real_c_negat) %!in% detected]
+                
+                df <- data.frame(rbind(tp=length(tp), fp=length(fp),fn=length(fn), tn=length(tn)))
+                df$group <- rownames(df)
+                colnames(df) <- c("value", "group")
+                df$group <-  factor(df$group, levels = c("fn", "fp", "tp", "tn"))
+                # Store the results
+                roc.data[nrow(roc.data)+1,] <-  c(paste(l,s,sep="x")
+                                                  , a
+                                                  , i
+                                                  , nreps
+                                                  , as.numeric(length(tp))
+                                                  , as.numeric(length(fp))
+                                                  , as.numeric(length(fn))
+                                                  , as.numeric(length(tn))
+                )
+            }
+        }
+      }
+    }
+  }
+  # tpr = tp/(tp+fn)
+  # fpr = fp/(fp+tn)
+  roc.data[, c("TP", "FP", "FN", "TN")] <- sapply(roc.data[, c("TP", "FP", "FN", "TN")], as.numeric)
+  roc.data$tpr <- roc.data$TP/(roc.data$TP+roc.data$FN)
+  roc.data$fpr <- roc.data$FP/(roc.data$FP+roc.data$TN)
+  roc.data$precision <- roc.data$TP/(roc.data$TP+roc.data$FP)
+  roc.data$l <- sapply(strsplit(roc.data$Dataset, "x"), "[[", 1)
+  roc.data$s <- sapply(strsplit(roc.data$Dataset, "x"), "[[", 2)
+  roc.data$Reps <- as.character(roc.data$Reps)
+  write.csv(roc.data, "./RESULTS/Subsampling/files/roc_results_alt.csv")
+  # write.csv(roc.data, "./RESULTS/Subsampling/files/roc_results.csv")
+}else{
+  roc.data <- read.csv("./RESULTS/Subsampling/files/roc_results_alt.csv")
+}
+
+```
+
+
+```{r roc_curves_jtk_nls_reps, echo=FALSE, fig.height=8, fig.width=5, message=FALSE, warning=FALSE}
+roc_data_subset <- subset(roc.data[which(roc.data$Algorithm=="NLS" & roc.data$l==24),], select=-c(Algorithm))
+roc_data_subset$Reps <- as.character(roc_data_subset$Reps)
+nls_plot <- ggplot(roc_data_subset,aes(y = tpr, x = fpr, color = Reps))+
+              geom_line() +
+              xlim(0,0.05) +
+              ylim(0,1) +
+              ggtitle("NLS") +
+              theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+              facet_wrap(~s,ncol=1) +
+              theme(strip.background = element_blank())
+
+roc_data_subset <- subset(roc.data[which(roc.data$Algorithm=="JTK" & roc.data$l==24),], select=-c(Algorithm))
+roc_data_subset$Reps <- as.character(roc_data_subset$Reps)
+jtk_plot <- ggplot(roc_data_subset,aes(y = tpr, x = fpr, color = Reps))+
+              geom_line() +
+              xlim(0,0.05) +
+              ylim(0,1) +
+              ggtitle("JTK") +
+              theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+              facet_wrap(~s,ncol=1)+
+              theme(strip.background = element_blank())
+
+plot_grid(nls_plot,jtk_plot)
+```
+
+```{r precision_recal_curves_jtk_nls, echo=FALSE, fig.height=8, fig.width=5, message=FALSE, warning=FALSE}
+nls_plot <- ggplot(roc_data_subset,aes(y = tpr, x = 1-precision, color = Reps))+
+              geom_line() +
+              xlim(0,0.05) +
+              ylim(0,1) +
+              ggtitle("NLS") +
+              theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+              facet_wrap(~s,ncol=1) +
+              theme(strip.background = element_blank())
+
+
+jtk_plot <- ggplot(roc_data_subset,aes(y = tpr, x = 1-precision, color = Reps))+
+              geom_line() +
+              xlim(0,0.05) +
+              ylim(0,1) +
+              ggtitle("JTK") +
+              theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+              facet_wrap(~s,ncol=1)+
+              theme(strip.background = element_blank())
+
+plot_grid(nls_plot,jtk_plot)
+```
+
+
+```{r roc_curves_jtk_nls_sampling, echo=FALSE, fig.height=8, fig.width=5, message=FALSE, warning=FALSE}
+roc_data_subset <- roc.data[which(roc.data$Algorithm=="NLS" & roc.data$l==24),]
+roc_data_subset$Reps <- as.character(roc_data_subset$Reps)
+roc_data_subset$s <- as.character(roc_data_subset$s)
+nls_plot <- ggplot(roc_data_subset,aes(y = tpr, x = fpr, color = s))+
+              geom_line() +
+              # xlim(0,0.05) +
+              # ylim(0,1) +
+              ggtitle("NLS") +
+              theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+              facet_wrap(~Reps,ncol=1) +
+              theme(strip.background = element_blank())
+
+roc_data_subset <- roc.data[which(roc.data$Algorithm=="JTK" & roc.data$l==24),]
+roc_data_subset$Reps <- as.character(roc_data_subset$Reps)
+roc_data_subset$s <- as.character(roc_data_subset$s)
+jtk_plot <- ggplot(roc_data_subset,aes(y = tpr, x = fpr, color = s))+
+              geom_line() +
+              # xlim(0,0.05) +
+              # ylim(0,1) +
+              ggtitle("JTK") +
+              theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+              facet_wrap(~Reps,ncol=1)+
+              theme(strip.background = element_blank())
+
+plot_grid(nls_plot,jtk_plot)
+```
+
+
+```{r roc_24_3reps_jtk_nls, echo=FALSE, message=FALSE, warning=FALSE}
+data.24.3reps <- roc.data
+data.24.3reps <- data.24.3reps[Reduce(intersect, list(which(data.24.3reps$l=="24")
+                                                     , which(data.24.3reps$Reps == 3))),]
+data.24.3reps$Reps <- as.character(data.24.3reps$Reps)
+data.24.3reps$s <- as.character(data.24.3reps$s)
+ggplot(data.24.3reps,aes(y = tpr, x = fpr, color = s))+
+        geom_line() +
+        # xlim(0,0.05) +
+        # ylim(0,1) +
+        theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+        guides(color=guide_legend(title="Sampling interval")) +
+        facet_wrap(~Algorithm,ncol=2)+
+        theme(strip.background = element_blank())
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+data.24.all <- results[intersect(grep("24", results$Dataset), 
+                                       grep("JTK_c_q|NLS_c", results$Algorithm)),]
+data.24.all$interval <- sapply(strsplit(as.character(data.24.all$Dataset), "x"), "[[", 2)
+data.24.all$reps <- as.character(data.24.all$reps)
+data.long.all <- melt(data.24.all[,c("FN.q","TP.q", "FP.q", "Dataset", "Algorithm", "reps", "interval")], value.name="freq", variable.name = "measure", id.vars=c("Dataset", "Algorithm", "reps", "interval"))
+
+
+# data.nls$measure <- factor(data.nls$measure,levels(data.nls$measure)[c(3,1,2)])
+data.long.all$measure <- factor(data.long.all$measure, levels=c("FP.q", "FN.q", "TP.q"))
+```
+
+
+```{r bars_jtk_nls, echo=FALSE, message=FALSE, warning=FALSE, fig.height=8, fig.width=5}
+nls.bars <- ggplot(data.long.all[which(data.long.all$Algorithm=="NLS_c"),], aes(y = freq, x = reps, fill = measure))+
+            geom_bar(stat = "identity",color="white") +
+            ggtitle("NLS") +
+            scale_fill_manual(name = "Total hits"
+                             , values = c("firebrick4", "gray63" , "deepskyblue3")
+                             , guide=FALSE
+                             # , labels = c("False Positives", "False Negatives", "True Positives")
+                             ) +
+            theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+            facet_wrap(~interval,ncol=1) +
+            theme(strip.background = element_blank())
+
+jtk.bars <- ggplot(data.long.all[which(data.long.all$Algorithm=="JTK_c_q"),], aes(y = freq, x = reps, fill = measure))+
+            geom_bar(stat = "identity",color="white") +
+            ggtitle("JTK") +
+            scale_fill_manual(name = "Total hits"
+                             , values = c("firebrick4", "gray63" , "deepskyblue3")
+                             # , labels = c("False Positives", "False Negatives", "True Positives")
+                             , guide=FALSE
+                             ) +
+            theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+            facet_wrap(~interval,ncol=1)+
+            theme(strip.background = element_blank())
+plot_grid(nls.bars, jtk.bars
+          # , rel_widths = c(0.9,1.5)
+          )
+```
+
+# Experimental design calc
+
+```{r message=FALSE, warning=FALSE}
+
+# roc.data <- read.csv("./RESULTS/Subsampling/files/roc_results_alt.csv")
+# colnames(roc.data) <- c("X", "Dataset", "Algorithm", "Threshold", "Reps", "TP", "FP", "FN"
+#                       , " TN", "TPR", "FPR", "Precision", "Length", "Interval")
+# roc.data$Total_mice <- (roc.data$Length/roc.data$Interval)*roc.data$Reps
+# exp_calc <- roc.data
+# saveRDS(exp_calc, file="../../../../home/arubio/Dropbox/CircaN/data/exp_calc.Rds")
+
+
+# total_mice <- 0
+# interval <- 4
+# c_reps <- 3
+# c_length <- 24
+mode <- c("max_tp", "min_fp", "max_tp_fp_ratio", "min_fn")
+
+
+
+info <- roc.data[which(roc.data$threshold==0.05),]
+info$total_mice <- (info$l/info$s)*info$Reps
+
+experiment_calc <- function(total_mice=NA, interval=NA, reps=NA, length=NA, mode="max_tp_fp_ratio"){
+  input <- c("total_mice", "interval", "c_reps", "c_length")
+  expression <- "info$threshold==0.05"
+  for (i in input){
+    if (!is.na(get(i))){expression=paste(expression, " & info$", i, "==", get(i), sep="")}
+  }
+  # sapply(input, is.na)
+  filtered_info <- info[which(eval(parse(text=expression))),]
+  switch(mode, 
+        max_tp={
+          
+          print('max_tp')
+        },
+        min_fp={
+          # case 'bar' here...
+          print('min_fp')    
+        },
+        max_tp_fp_ratio={
+          # case 'bar' here...
+          print('max_tp_fp_ratio')    
+        },
+        {
+           print('default')
+        }
+    )
+}
+
+```
+
+
+# Doc
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+sampling <- c(1,2,3,4,6)
+lengths <- c(24, 48)
+reps <- c(1,2,3,4,5)
+
+datasets <- setNames(data.frame(matrix(ncol = 4, nrow = 0))
+                                , c("Dataset", "Length", "Sampling", "Reps"))
+
+for (nreps in reps){
+  for (l in lengths){
+    for (s in sampling){
+      datasets[(nrow(datasets)+1),] <- c(paste(l,s,nreps,sep="_"), l, s, nreps)
+    }
+  }
+}
+
+write.csv(datasets, "./DOC/Subsampling/datasets_info.csv")
+```
+

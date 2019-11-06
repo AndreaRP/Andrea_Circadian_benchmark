@@ -1,0 +1,246 @@
+---
+title: "Benchmarking of subsampled datasets ROC curves using JTK and NLS."
+author: "Andrea Rubio-Ponce"
+date: "`r format(Sys.time(), '%m, %Y')`"
+output: 
+  pdf_document: 
+    dev: pdf
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+documentclass: article
+urlcolor: blue
+classoption: a4paper
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{float}
+- \usepackage{longtable}
+---
+
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+# Functions, Constants and graphical variables      
+knitr::opts_knit$set(root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/")
+require("knitr")
+knitr::opts_chunk$set(
+    	fig.align = "center",
+    	fig.path = "/data3/arubio/projects/Andrea_Circadian_benchmark/RESULTS/Subsampling/plots/",
+    	fig.pos = "H",
+    	message = FALSE,
+    	warning = FALSE,
+    	dev = c("png", "pdf"),
+    	dpi = 500,
+    	# include = FALSE,
+    	root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/"
+      )
+setwd("/data3/arubio/projects/Andrea_Circadian_benchmark/")
+knitr::opts_knit$get("root.dir")
+```
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+library("RColorBrewer")
+library("pheatmap")
+library("ggplot2")
+library("gplots")
+library("NMF")
+library("cluster")
+library("fpc")
+library("plyr")
+library("VennDiagram")
+library("knitr")
+library("xtable")
+library("knitcitations")
+library("dplyr")
+library("reshape2")
+library("AnnotationDbi")
+library("mouse4302.db")
+library("affy")
+library("broom")
+library("nlme")
+library("panp")
+library("MetaCycle")
+library("cowplot")
+source("./SW/JTKversion3/JTK_CYCLEv3.1.R")
+source("./SRC/Regression_lib.R")
+source("./SRC/Utils.R")
+
+# dir.create("./RESULTS/NLS_benchmarking/Hughes/files/", recursive = T)
+dir.create("./RESULTS/Subsampling/files/", recursive=T)
+dir.create("./RAW/Subsampling/", recursive=T)
+cite_options(citation_format = "compatibility",
+hyperlink = FALSE, cite.style = "authoryear", super = FALSE,
+max.names = 1, longnamesfirst = FALSE, check.entries = FALSE)
+```
+
+
+# Description
+
+We create a single dataframe of 48x1 in silico. An 80% of the genes are generated using the madsim package `r sanitize(citep(citation("madsim")))`. The other 20% were generated using random periods (8:30), amplitudes (0.5:4) and phases (-6:6) and adding normal noise and a SD = 1.5.
+With that dataframe, different subsamling is done to recreate several experiment configurations.
+Number of replicates: 1, 3 and 5
+Experimental design: 24h and 48h long with 1,2,3,4, and 6h between timepoints.
+To see how well every algorithm does with different frequencies and amplitudes, the genes considered "true" were divided into categories:
+All rythmic genes: all amps, per 8:30
+Ultradian genes: all amps, per 8:19
+Circadian genes: all amps, per 20:30
+Low genes: amp 0:1.5, all pers
+High genes: amp 1.5: , all pers
+
+A gene is considered "positive" if it passes the threshold of significance and the estimated period or amplitude is in the range of the true gene (per = 8:19 for ultradian genes and so on).
+
+This is an appendix of the subsampling code to generate al the ROC curves of NLS and JTK.
+
+## ROC Curves
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+if(!file.exists("./RESULTS/Subsampling/files/roc_results.csv")){
+  roc.data <- setNames(data.frame(matrix(ncol = 8, nrow = 0))
+                     , c("Dataset","Algorithm", "threshold", "Reps","TP", "FP", "FN", "TN"))
+  algorithms <- c("JTK", "NLS")
+  sequence <- round(seq(from = 0, to = 1, length.out = 1000),digits=3)
+  for (nreps in reps){
+    for (l in lengths){
+      for (s in sampling){
+        for (a in algorithms){
+            full_exprs <- read.csv("./RAW/Subsampling/subsampling_in_silico_data.csv", row.names=1)
+            # Get real genes
+            real_genes <- full_exprs[which(!is.na(full_exprs$per)),]
+            real_negat <- full_exprs[which(is.na(full_exprs$per)),]
+            a_results <- read.csv(paste("./RESULTS/Subsampling/files/subsampling_",a,"_",l,"_",s,"_", nreps,"_reps.csv", sep=""))
+            cat(nreps,l,s,a,"\n")
+            for (i in sequence){
+              if(a=="JTK"){
+                results_roc <- a_results[which(jtk_results$BH.Q<0.05 & a_results$PER>=20 & a_results$PER<=30),]
+                detected <- results_roc$Probeset
+              }else{
+                results_roc <- a_results[which(a_results$estimate.per<=30 &
+                                            a_results$estimate.per>=20 &
+                                           (a_results$BH.q.value.per<0.05 | is.na(a_results$BH.q.value.per)) &
+                                            a_results$r>=0.7 &
+                                            a_results$BH.q.value.amp<0.05
+                                           ),]
+                detected <- results_roc$feature
+              }
+                tp <-  Reduce(intersect, list(rownames(real_genes),detected))
+                fp <- detected[detected %!in% rownames(real_genes)]
+                fn <- rownames(real_genes)[rownames(real_genes) %!in% detected]
+                tn <- rownames(real_negat)[rownames(real_negat) %!in% detected]
+                
+                df <- data.frame(rbind(tp=length(tp), fp=length(fp),fn=length(fn), tn=length(tn)))
+                df$group <- rownames(df)
+                colnames(df) <- c("value", "group")
+                df$group <-  factor(df$group, levels = c("fn", "fp", "tp", "tn"))
+                # Store the results
+                roc.data[nrow(roc.data)+1,] <-  c(paste(l,s,sep="x")
+                                                  , a
+                                                  , i
+                                                  , nreps
+                                                  , as.numeric(length(tp))
+                                                  , as.numeric(length(fp))
+                                                  , as.numeric(length(fn))
+                                                  , as.numeric(length(tn))
+                )
+            }
+        }
+      }
+    }
+  }
+  write.csv(roc.data, "./RESULTS/Subsampling/files/roc_results.csv")
+}else{
+  roc.data <- read.csv("./RESULTS/Subsampling/files/roc_results.csv")
+  
+}
+roc.data$Reps <- as.character(roc.data$Reps)
+roc.data$s <- paste("x ", roc.data$s, "h", sep="")
+```
+
+
+```{r nls_jtk_roc_curves, echo=FALSE, fig.height=6, fig.width=6, message=FALSE, warning=FALSE}
+roc_data_subset <- subset(roc.data[which(roc.data$Algorithm=="NLS" & roc.data$l==24),], select=-c(Algorithm))
+roc_data_subset$Reps <- as.character(roc_data_subset$Reps)
+nls_plot <- ggplot(roc_data_subset,aes(y = tpr, x = fpr, color = Reps))+
+              geom_line() +
+              # xlim(0,0.20) +
+              ylim(0,1) +
+              labs(color = "Replicate #") + 
+              ggtitle("NLS") +
+              facet_wrap(~s,ncol=1
+                         , scales="free" # Keep the axis on all the plots
+                         ) +
+              theme(axis.title=element_blank()
+                  , axis.ticks=element_blank()
+                  , strip.background = element_rect(colour="white", fill="white")
+                  , strip.placement = "outside"
+                  , strip.text = element_text(size=10, face="bold")
+                  , axis.text = element_text(size=8)
+                  , strip.text.y = element_text(hjust=-10)
+              )
+
+roc_data_subset <- subset(roc.data[which(roc.data$Algorithm=="JTK" & roc.data$l==24),], select=-c(Algorithm))
+
+jtk_plot <- ggplot(roc_data_subset,aes(y = tpr, x = fpr, color = Reps))+
+              geom_line() +
+              # xlim(0,0.20) +
+              ylim(0,1) +
+              labs(color = "Replicate #") + 
+              ggtitle("JTK") +
+              facet_wrap(~s,ncol=1
+                         , scales='free'
+                         ) +
+              theme(axis.title=element_blank()
+                  , axis.ticks=element_blank()
+                  , strip.background = element_rect(colour="white", fill="white")
+                  , strip.placement = "outside"
+                  , strip.text = element_text(size=10, face="bold")
+                  , axis.text = element_text(size=8)
+                  , strip.text.y = element_text(hjust=-10)
+              )
+
+plot_grid(nls_plot,jtk_plot)
+```
+
+```{r nls_jtk_roc_curves_xlim_0_20, echo=FALSE, fig.height=6, fig.width=6, message=FALSE, warning=FALSE}
+roc_data_subset <- subset(roc.data[which(roc.data$Algorithm=="NLS" & roc.data$l==24),], select=-c(Algorithm))
+roc_data_subset$Reps <- as.character(roc_data_subset$Reps)
+nls_plot <- ggplot(roc_data_subset,aes(y = tpr, x = fpr, color = Reps))+
+              geom_line() +
+              xlim(0,0.10) +
+              ylim(0,1) +
+              labs(color = "Replicate #") + 
+              ggtitle("NLS") +
+              facet_wrap(~s,ncol=1
+                         , scales="free" # Keep the axis on all the plots
+                         ) +
+              theme(axis.title=element_blank()
+                  , axis.ticks=element_blank()
+                  , strip.background = element_rect(colour="white", fill="white")
+                  , strip.placement = "outside"
+                  , strip.text = element_text(size=10, face="bold")
+                  , axis.text = element_text(size=8)
+                  , strip.text.y = element_text(hjust=-10)
+              )
+
+roc_data_subset <- subset(roc.data[which(roc.data$Algorithm=="JTK" & roc.data$l==24),], select=-c(Algorithm))
+
+jtk_plot <- ggplot(roc_data_subset,aes(y = tpr, x = fpr, color = Reps))+
+              geom_line() +
+              xlim(0,0.10) +
+              ylim(0,1) +
+              labs(color = "Replicate #") + 
+              ggtitle("JTK") +
+              facet_wrap(~s,ncol=1
+                         , scales='free'
+                         ) +
+              theme(axis.title=element_blank()
+                  , axis.ticks=element_blank()
+                  , strip.background = element_rect(colour="white", fill="white")
+                  , strip.placement = "outside"
+                  , strip.text = element_text(size=10, face="bold")
+                  , axis.text = element_text(size=8)
+                  , strip.text.y = element_text(hjust=-10)
+              )
+
+plot_grid(nls_plot,jtk_plot)
+```

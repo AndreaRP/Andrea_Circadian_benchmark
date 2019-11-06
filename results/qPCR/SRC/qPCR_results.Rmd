@@ -1,0 +1,562 @@
+---
+title: "qPCR Results"
+author: "Andrea Rubio-Ponce"
+date: "`r format(Sys.time(), '%m, %Y')`"
+output: 
+  pdf_document: 
+    dev: pdf
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+documentclass: article
+urlcolor: blue
+classoption: a4paper
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{float}
+---
+
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+# Functions, Constants and graphical variables      
+knitr::opts_knit$set(root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/")
+require("knitr")
+knitr::opts_chunk$set(
+	fig.align = "center",
+	fig.path = "/data3/arubio/projects/Andrea_Circadian_benchmark/RESULTS/qPCR/RESULTS/plots/",
+	fig.pos = "H",
+	message = FALSE,
+	warning = FALSE,
+	include=FALSE,
+	dev = c("pdf"),
+	dpi = 500,
+	root.dir = "/data3/arubio/projects/Andrea_Circadian_benchmark/"
+)
+setwd("/data3/arubio/projects/Andrea_Circadian_benchmark/")
+knitr::opts_knit$get("root.dir")
+dir.create("./RESULTS/qPCR/RESULTS/files/", recursive = T)
+dir.create("./RESULTS/qPCR/RESULTS/Rdata/", recursive = T)
+```
+
+
+```{r include=FALSE}
+library("dplyr")
+library("ggplot2")
+library("cowplot")
+library("ArpyLib")
+library("reshape2")
+library("venn")
+if("plyr" %in% (.packages())){
+  detach("package:plyr", unload=TRUE) 
+}
+```
+
+
+# RNA-seq
+
+```{r}
+# Get RNAseq data
+jtk <- read.csv("./RESULTS/RNAseq/files/jtk_genes_kmeans.csv", stringsAsFactors = F, row.names = 1)
+nls <- read.csv("./RESULTS/RNAseq/files/nls_genes_kmeans.csv", stringsAsFactors = F, row.names = 1)
+exprs <- read.csv("../Ivan_Neutrophils_circadian_Liver/ANALYSES/NLS/files/normalized_counts.csv"
+                  , row.names = 1
+                  , stringsAsFactors = F)
+nls.results.liver <- read.csv("../Ivan_Neutrophils_circadian_Liver/ANALYSES/NLS/files/nls_wt_result_liver.csv"
+                              , row.names = 1
+                            , stringsAsFactors = F)
+rownames(nls.results.liver) <- nls.results.liver$feature
+
+nls_genes_q <- nls.results.liver[which(nls.results.liver$estimate.per<=30 &
+                                      nls.results.liver$estimate.per>=20 &
+                                     (nls.results.liver$BH.q.value.per<0.05 | is.na(nls.results.liver$BH.q.value.per)) &
+                                      nls.results.liver$r>=0.7 &
+                                      nls.results.liver$BH.q.value.amp<0.05
+                                     ),]
+s2c.rnaseq <- read.csv("../Ivan_Neutrophils_circadian_Liver/DOC/s2c.csv")
+s2c.wt <- s2c.rnaseq[which(s2c.rnaseq$group=="WT"),]
+s2c.wt <- dplyr::rename(s2c.wt
+                     , time = ZT
+                     , ind = subjectID)
+s2c.wt$time <- as.numeric(s2c.wt$time)
+
+
+ven.list <- list(JTK=rownames(jtk)
+               , NLS=rownames(nls)
+              )
+
+ven.diagram <- venn::venn(x=ven.list
+                       , ilab=TRUE
+                       , zcolor = "style"
+                       , intersections=T
+                       , show.plot=T)
+intersections <- attr(ven.diagram,"intersections")
+
+nls.only <- nls[intersections$NLS,]
+# exprs_data <- exprs[rownames(nls.only),]
+nls.merged <- cbind(nls.only, nls_genes_q[match(rownames(nls.only), nls_genes_q$feature),])
+nls.merged <- nls.merged[order(-xtfrm(nls.merged$r)),]
+
+std.err <- function(x) sd(x)/sqrt(length(x))
+s2c.wt$sample <- as.character(s2c.wt$sample)
+```
+
+```{r include=FALSE}
+# Get qPCR data
+results <- read.csv("./RESULTS/qPCR/qPCR_results_clean.csv", stringsAsFactors = F)
+results$Sample.Name[!grepl("^SAMPLE1", results$Sample.Name)] <- gsub("SAMPLE", "SAMPLE0", results$Sample.Name[!grepl("^SAMPLE1", results$Sample.Name)])
+results$Sample.Name[grep("^SAMPLE1$", results$Sample.Name)] <- "SAMPLE01"
+# Assign ZT
+results$ZT <- plyr::revalue(results$Sample.Name, c(SAMPLE01 = 10, SAMPLE02 = 11, SAMPLE03 = 13, SAMPLE04 = 15
+                                                 , SAMPLE05 = 16, SAMPLE06 = 18, SAMPLE07 = 19, SAMPLE08 = 21
+                                                 , SAMPLE09 = 22, SAMPLE10 = 24, SAMPLE11 = 1, SAMPLE12 = 3
+                                                 , SAMPLE13 = 4, SAMPLE14 = 6, SAMPLE15 = 7, SAMPLE16 = 9)) 
+results <- results[order(results$Gene, results$Sample.Name),]
+
+
+# Avg
+r <- as.data.frame(results %>% group_by(Gene, Sample.Name) %>% summarise(average = mean(Ct))) #(dplyr)
+r$ZT <- plyr::revalue(r$Sample.Name, c(SAMPLE01 = 10, SAMPLE02 = 11, SAMPLE03 = 13, SAMPLE04 = 15
+                                     , SAMPLE05 = 16, SAMPLE06 = 18, SAMPLE07 = 19, SAMPLE08 = 21
+                                     , SAMPLE09 = 22, SAMPLE10 = 24, SAMPLE11 = 1, SAMPLE12 = 3
+                                     , SAMPLE13 = 4, SAMPLE14 = 6, SAMPLE15 = 7, SAMPLE16 = 9)) 
+r <- r[order(r$Gene, r$Sample.Name),]
+ctrl <- r[which(r$Gene=="Hmbs"),]
+ctrl$ind <- 1
+norm.vector <- numeric()
+for (gene in unique(results$Gene)){
+  r1 <- r[which(r$Gene==gene),]
+  norm.vector <- c(norm.vector, ctrl$average-r1$average)
+}
+# Norm
+r$norm <- norm.vector
+# Log
+r$log <- 2^r$norm
+
+r$true.log <- log(r$log)
+
+# CircaN
+s2c <- data.frame(sample=ctrl$Sample.Name
+                  , time=as.numeric(ctrl$ZT)
+                  , ind=ctrl$ind
+                  , stringsAsFactors = F
+)
+
+circan.data <- dcast(data = r, formula = Gene~Sample.Name, fun.aggregate = sum, value.var = "true.log")
+circan.results <- circan(data=circan.data, s2c=s2c[,c("sample", "ind", "time")], mode="port")
+rownames(circan.results) <- circan.results$feature
+candidates <- unique(results$Gene)
+```
+
+
+```{r}
+library("plyr")
+clock <- c("Arntl", "Cry1", "Cry2", "Per1", "Per2", "Per3", "Nr1d1", "Nr1d2", "Rorc")
+for (gene in clock){
+  gene_id <- exprs[which(exprs[,"ext_gene"] == gene), "Row.names"]
+  data.long.wt <- data.frame(data = as.numeric(t(exprs[which(exprs[,"ext_gene"] == gene)
+                                                      ,s2c.wt$sample]))
+                          , time = s2c.wt$time
+                          , ind = s2c.wt$ind
+                          , condition = s2c.wt$group
+                          )
+  data.long.wt.mean <- aggregate(data.long.wt[, 1], list(data.long.wt$time), mean)
+  colnames(data.long.wt.mean) <- c("time", "data")
+  data.long.wt.mean$ind <- rep("mean_ind", each=nrow(data.long.wt.mean))
+  data.long.wt.mean$condition <- rep("mean", each=nrow(data.long.wt.mean))
+  data.long.wt.std.err <- ddply(data.long.wt, .(time), summarize, sderr = std.err(data))
+  g1 <- plyr::round_any(as.numeric(nls.results.liver[gene_id, c("estimate.amp", "estimate.per"
+                                , "estimate.phase", "r")]), accuracy = .01, f = floor)
+  
+  temp <- ggplot(data.long.wt, aes(x = time, y = data, group = condition)) +
+  stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(data.long.wt.mean$data)
+              , size=2, colour="red") + # regression function
+  geom_line(data=data.long.wt.mean, aes(group = interaction(condition, ind))
+          , size=2, color="#1e8449") + # mean line
+  geom_point(data=data.long.wt.mean, aes(group = interaction(condition, ind), color=condition)
+           , size=2, colour="#2ecc71") +# 
+  geom_errorbar(data=data.long.wt.mean, aes(ymin=data-data.long.wt.std.err$sderr
+                                          , ymax=data+data.long.wt.std.err$sderr
+                                          , color=condition), width=1, color="#1e8449", size=1) +
+  # scale_x_discrete(name="Time", breaks=unique(s2c.wt$ZT)) +
+  ylab("Expression") +
+  ggtitle(gene) +
+  theme_bw() +    
+    theme(panel.border = element_blank(), panel.grid.major = element_blank()         
+        , panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  
+  assign(paste("rnaseq_clock", gene, sep="_"), plot_to_gtable(temp))
+}
+```
+
+```{r rnaseq_clock_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.height=5, fig.width=8, include=TRUE, fig.cap="RNAseq clock genes with their estimated curve."}
+plot_list <- list()
+for(i in paste("rnaseq_clock", clock, sep="_")){
+  plot_list[[i]] <- get(i)
+}
+
+plot_grid(plotlist=plot_list
+        , ncol = 3)
+```
+
+
+```{r}
+for (gene in candidates){
+  gene_id <- exprs[which(exprs[,"ext_gene"] == gene), "Row.names"]
+  data.long.wt <- data.frame(data = as.numeric(t(exprs[which(exprs[,"ext_gene"] == gene)
+                                                      ,s2c.wt$sample]))
+                          , time = s2c.wt$time
+                          , ind = s2c.wt$ind
+                          , condition = s2c.wt$group
+                          )
+  data.long.wt.mean <- aggregate(data.long.wt[, 1], list(data.long.wt$time), mean)
+  colnames(data.long.wt.mean) <- c("time", "data")
+  data.long.wt.mean$ind <- rep("mean_ind", each=nrow(data.long.wt.mean))
+  data.long.wt.mean$condition <- rep("mean", each=nrow(data.long.wt.mean))
+  data.long.wt.std.err <- ddply(data.long.wt, .(time), summarize, sderr = std.err(data))
+  g1 <- plyr::round_any(as.numeric(nls.results.liver[gene_id, c("estimate.amp", "estimate.per"
+                                , "estimate.phase", "r")]), accuracy = .01, f = floor)
+  
+  temp <- ggplot(data.long.wt, aes(x = time, y = data, group = condition)) +
+  stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(data.long.wt.mean$data)
+              , size=1, colour="red") + # regression function
+  geom_line(data=data.long.wt.mean, aes(group = interaction(condition, ind))
+          , size=1, color="#1e8449") + # mean line
+  geom_point(data=data.long.wt.mean, aes(group = interaction(condition, ind), color=condition)
+           , size=1.5, colour="#2ecc71") +# 
+  geom_errorbar(data=data.long.wt.mean, aes(ymin=data-data.long.wt.std.err$sderr
+                                          , ymax=data+data.long.wt.std.err$sderr
+                                          , color=condition), width=0.7, color="#1e8449", size=0.7) +
+  # scale_x_discrete(name="Time", breaks=unique(s2c.wt$ZT)) +
+  ylab("Expression") +
+  ggtitle(gene) +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank()
+        , plot.title = element_text(face="italic")
+        , panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+  
+  assign(paste("gene_rnaseq", gene, sep="_"), plot_to_gtable(temp))
+}
+```
+
+```{r circan_selected_genes, echo=FALSE, message=FALSE, warning=FALSE, fig.height=5, fig.width=8, include=TRUE, fig.cap="RNAseq expression of genes selected for qPCR."}
+plot_list <- list()
+for(i in paste("gene_rnaseq", candidates, sep="_")){
+  plot_list[[i]] <- get(i)
+}
+
+plot_grid(plotlist=plot_list
+        , ncol = 3)
+```
+
+
+# qPCR
+
+<!-- ```{r include=FALSE} -->
+<!-- # Plot qPCR genes -->
+<!-- for (g in candidates){ -->
+<!--   # Get the gene data -->
+<!--   gene.data <- r[which(r$Gene == g),] -->
+<!--   # Get the fit data -->
+<!--   g1 <- plyr::round_any(as.numeric(circan.results[g, c("estimate.amp", "estimate.per", "estimate.phase", "r")]) -->
+<!--                       , accuracy = .01, f = floor) -->
+
+<!--   data.long <- data.frame(data = as.numeric(gene.data$norm) -->
+<!--                         , time = gene.data$ZT -->
+<!--                         , ind = 1 -->
+<!--                         , condition = "WT" -->
+<!--                         , stringsAsFactors = F -->
+<!--                           ) -->
+<!--   data.long <- data.long[order(as.numeric(data.long$time)),] -->
+<!--   p <- data.long -->
+<!--   p$time <- as.numeric(p$time) -->
+
+<!--   temp <- ggplot(p, aes(x = time, y = data, group = condition)) + -->
+<!--     stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(p$data), size=0.2, colour="red") + # regression function -->
+<!--     geom_line(data=p, aes(group = interaction(condition, ind)) -->
+<!--               , size=0.4, color="#1e8449") + # mean line -->
+<!--     geom_point(data=p, aes(group = interaction(condition, ind), color=condition) -->
+<!--                , size=0.7, colour="#2ecc71") + -->
+<!--     scale_x_continuous(name="Time", breaks=as.numeric(unique(results$ZT))) + -->
+<!--     ylab("Expression") + -->
+<!--     ggtitle(paste(g, " r = ", g1[4], sep="")) + -->
+<!--     theme_bw() +     -->
+<!--     theme(panel.border = element_blank(), panel.grid.major = element_blank()          -->
+<!--         , panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) -->
+
+<!--   assign(paste("gene", g, sep="_"), plot_to_gtable(temp)) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r norm_expression, echo=FALSE, include=TRUE, fig.cap="qPCR normalized expression of genes selected using RNAseq."} -->
+<!-- plot_list <- list() -->
+<!-- for(i in paste("gene", candidates, sep="_")){ -->
+<!--   plot_list[[i]] <- get(i) -->
+<!-- } -->
+
+<!-- plot_grid(plotlist=plot_list , ncol = 3) -->
+<!-- ``` -->
+
+<!-- ```{r include=FALSE} -->
+<!-- library("plyr") -->
+<!-- # Plot -->
+<!-- # candidates <- unique(results$Gene) -->
+<!-- for (g in candidates){ -->
+<!--   # Get the gene data -->
+<!--   gene.data <- r[which(r$Gene == g),] -->
+<!--   # Get the fit data -->
+<!--   g1 <- plyr::round_any(as.numeric(circan.results[g, c("estimate.amp", "estimate.per", "estimate.phase", "r")]) -->
+<!--                       , accuracy = .01, f = floor) -->
+
+<!--   data.long <- data.frame(data = as.numeric(gene.data$log) -->
+<!--                         , time = gene.data$ZT -->
+<!--                         , ind = 1 -->
+<!--                         , condition = "WT" -->
+<!--                         , stringsAsFactors = F -->
+<!--                           ) -->
+<!--   data.long <- data.long[order(as.numeric(data.long$time)),] -->
+<!--   p <- data.long -->
+<!--   p$time <- as.numeric(p$time) -->
+
+<!--   temp <- ggplot(p, aes(x = time, y = data, group = condition)) + -->
+<!--     # stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(p$data), size=0.2, colour="red") + # regression function -->
+<!--     geom_line(data=p, aes(group = interaction(condition, ind)) -->
+<!--               , size=0.4, color="#1e8449") + # mean line -->
+<!--     geom_point(data=p, aes(group = interaction(condition, ind), color=condition) -->
+<!--                , size=0.7, colour="#2ecc71") + -->
+<!--     scale_x_continuous(name="Time", breaks=as.numeric(unique(results$ZT))) + -->
+<!--     ylab("Expression") + -->
+<!--     ggtitle(paste(g, " r = ", g1[4], sep="")) + -->
+<!--     theme_bw() +     -->
+<!--     theme(panel.border = element_blank(), panel.grid.major = element_blank()          -->
+<!--         , panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) -->
+
+<!--   assign(paste("gene", g, sep="_"), plot_to_gtable(temp)) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r log_expression, echo=FALSE, fig.width=12, include=TRUE, fig.cap="qPCR 2(normalized expression) of genes selected using RNAseq."} -->
+<!-- plot_list <- list() -->
+<!-- for(i in paste("gene", candidates, sep="_")){ -->
+<!--   plot_list[[i]] <- get(i) -->
+<!-- } -->
+
+<!-- plot_grid(plotlist=plot_list , ncol = 3) -->
+<!-- ``` -->
+
+### All
+
+```{r include=FALSE}
+library("plyr")
+# Plot
+# candidates <- unique(results$Gene)
+for (g in candidates){
+  # Get the gene data
+  gene.data <- r[which(r$Gene == g),]
+  # Get the fit data
+  g1 <- plyr::round_any(as.numeric(circan.results[g, c("estimate.amp", "estimate.per", "estimate.phase", "r")])
+                      , accuracy = .01, f = floor)
+  
+  data.long <- data.frame(data = as.numeric(gene.data$true.log)
+                        , time = gene.data$ZT
+                        , ind = 1
+                        , condition = "WT"
+                        , stringsAsFactors = F
+                          )
+  data.long <- data.long[order(as.numeric(data.long$time)),]
+  p <- data.long
+  p$time <- as.numeric(p$time)
+  
+  temp <- ggplot(p, aes(x = time, y = data, group = condition)) +
+    stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(p$data), size=0.2, colour="red") + # regression function
+    geom_line(data=p, aes(group = interaction(condition, ind))
+              , size=0.4, color="#1e8449") + # mean line
+    geom_point(data=p, aes(group = interaction(condition, ind), color=condition)
+               , size=0.7, colour="#2ecc71") +
+    scale_x_continuous(name="Time", breaks=as.numeric(unique(results$ZT))) +
+    ylab("Expression") +
+    ggtitle(paste(g, " r = ", g1[4], sep="")) +
+    theme_bw() +    
+    theme(panel.border = element_blank(), panel.grid.major = element_blank()         
+        , panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  
+  assign(paste("gene", g, sep="_"), plot_to_gtable(temp))
+}
+```
+
+```{r true.log_expression, echo=FALSE, fig.width=12, include=TRUE, fig.cap="qPCR log(2(normalized expression)) of genes selected using RNAseq."}
+plot_list <- list()
+for(i in paste("gene", candidates, sep="_")){
+  plot_list[[i]] <- get(i)
+}
+
+plot_grid(plotlist=plot_list , ncol = 3)
+```
+
+### Dot
+
+```{r include=FALSE}
+library("plyr")
+# Plot
+# candidates <- unique(results$Gene)
+for (g in candidates){
+  # Get the gene data
+  gene.data <- r[which(r$Gene == g),]
+  # Get the fit data
+  g1 <- plyr::round_any(as.numeric(circan.results[g, c("estimate.amp", "estimate.per", "estimate.phase", "r")])
+                      , accuracy = .01, f = floor)
+  
+  data.long <- data.frame(data = as.numeric(gene.data$true.log)
+                        , time = gene.data$ZT
+                        , ind = 1
+                        , condition = "WT"
+                        , stringsAsFactors = F
+                          )
+  data.long <- data.long[order(as.numeric(data.long$time)),]
+  p <- data.long
+  p$time <- as.numeric(p$time)
+  
+  temp <- ggplot(p, aes(x = time, y = data, group = condition)) +
+    stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(p$data), size=0.2, colour="red") + # regression function
+    # geom_line(data=p, aes(group = interaction(condition, ind))
+    #           , size=0.4, color="#1e8449") + # mean line
+    geom_point(data=p, aes(group = interaction(condition, ind), color=condition)
+               , size=1, colour="#2ecc71") +
+    scale_x_continuous(name="Time", breaks=as.numeric(unique(results$ZT))) +
+    ylab("Expression") +
+    ggtitle(paste(g, " r = ", g1[4], sep="")) +
+    theme_bw() +    
+    theme(panel.border = element_blank(), panel.grid.major = element_blank()         
+        , panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  
+  assign(paste("gene_dot", g, sep="_"), plot_to_gtable(temp))
+}
+```
+
+```{r true.log_expression_dots, echo=FALSE, fig.width=10, include=TRUE, fig.cap="qPCR log(2(normalized expression)) of genes selected using RNAseq."}
+plot_list <- list()
+for(i in paste("gene_dot", candidates, sep="_")){
+  plot_list[[i]] <- get(i)
+}
+
+plot_grid(plotlist=plot_list , ncol = 3)
+```
+
+### Bar
+
+```{r include=FALSE}
+library("plyr")
+# Plot
+# candidates <- unique(results$Gene)
+for (g in candidates){
+  # Get the gene data
+  gene.data <- r[which(r$Gene == g),]
+  # Get the fit data
+  g1 <- plyr::round_any(as.numeric(circan.results[g, c("estimate.amp", "estimate.per", "estimate.phase", "r")])
+                      , accuracy = .01, f = floor)
+  
+  data.long <- data.frame(data = as.numeric(gene.data$true.log)
+                        , time = gene.data$ZT
+                        , ind = 1
+                        , condition = "WT"
+                        , stringsAsFactors = F
+                          )
+  data.long <- data.long[order(as.numeric(data.long$time)),]
+  p <- data.long
+  p$time <- as.numeric(p$time)
+  
+  temp <- ggplot(p, aes(x = time, y = data, group = condition)) +
+    geom_bar(stat="Identity", aes(group = interaction(condition, ind))
+              , size=0.4, color="black", fill="white") + # mean line
+    stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(p$data), size=0.2, colour="red") + # regression function
+    # geom_point(data=p, aes(group = interaction(condition, ind), color=condition)
+    #            , size=0.7, colour="#2ecc71") +
+    scale_x_continuous(name="Time", breaks=as.numeric(unique(results$ZT))) +
+    ylab("Expression") +
+    ggtitle(paste(g, " r = ", g1[4], sep="")) +
+    theme_bw() +    
+    theme(panel.border = element_blank(), panel.grid.major = element_blank()         
+        , panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  
+  assign(paste("gene_bar", g, sep="_"), plot_to_gtable(temp))
+}
+```
+
+```{r true.log_expression_bars, echo=FALSE, fig.width=10, include=TRUE, fig.cap="qPCR log(2(normalized expression)) of genes selected using RNAseq."}
+plot_list <- list()
+for(i in paste("gene_bar", candidates, sep="_")){
+  plot_list[[i]] <- get(i)
+}
+
+plot_grid(plotlist=plot_list , ncol = 3)
+```
+
+### Loess fit
+
+We fit the dots with parabole loess with a window of 5
+
+```{r include=FALSE}
+library("plyr")
+# Plot
+# candidates <- unique(results$Gene)
+for (g in candidates){
+  # Get the gene data
+  gene.data <- r[which(r$Gene == g),]
+  # Get the fit data
+  # plx<-predict(loess(y.norm ~ x, span=1/5, degree=2, family="symmetric", iterations=4), se=T)
+  
+  data.long <- data.frame(data = as.numeric(gene.data$true.log)
+                        , time = gene.data$ZT
+                        , ind = 1
+                        , condition = "WT"
+                        , stringsAsFactors = F
+                          )
+  data.long <- data.long[order(as.numeric(data.long$time)),]
+  p <- data.long
+  p$time <- as.numeric(p$time)
+  
+  temp <- ggplot(p, aes(x = time, y = data, group = condition)) +
+    geom_smooth(method = "loess", size = 2, se = FALSE) +
+    # stat_function(fun = function(t) g1[1]*sin(2*pi*t/g1[2] + g1[3]) + mean(p$data), size=0.2, colour="red") + # regression function
+    # geom_line(data=p, aes(group = interaction(condition, ind))
+    #           , size=0.4, color="#1e8449") + # mean line
+    geom_point(data=p, aes(group = interaction(condition, ind), color=condition)
+               , size=2, colour="#1e8449") +
+    scale_x_continuous(name="Time", breaks=as.numeric(unique(results$ZT))) +
+    ylab("Expression") +
+    ggtitle(g) +
+    theme_bw() +    
+    theme(panel.border = element_blank(), panel.grid.major = element_blank()      
+        , plot.title = element_text(face="italic")
+        , panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  
+  assign(paste("gene_loess", g, sep="_"), plot_to_gtable(temp))
+}
+```
+
+```{r loess_expression_dots, echo=FALSE, fig.width=10, include=TRUE, fig.cap="qPCR log(2(normalized expression)) of genes selected using RNAseq."}
+plot_list <- list()
+for(i in paste("gene_loess", candidates, sep="_")){
+  plot_list[[i]] <- get(i)
+}
+
+plot_grid(plotlist=plot_list , ncol = 3)
+```
+
+
+# Paper figure
+
+We just need Crbn, Naa50 and Nab1.
+
+```{r paper_plot_big, echo=FALSE, fig.height=12, fig.width=25, message=FALSE, warning=FALSE, include=TRUE}
+plot_grid(gene_rnaseq_Crbn, gene_rnaseq_Naa50, gene_rnaseq_Nab1
+        , gene_loess_Crbn, gene_loess_Naa50, gene_loess_Nab1
+        , ncol = 3)
+```
+
+```{r paper_plot, echo=FALSE, fig.height=6, fig.width=13, message=FALSE, warning=FALSE, include=TRUE}
+plot_grid(gene_rnaseq_Crbn, gene_rnaseq_Naa50, gene_rnaseq_Nab1
+        , gene_loess_Crbn, gene_loess_Naa50, gene_loess_Nab1
+        , ncol = 3)
+```
