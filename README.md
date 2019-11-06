@@ -1,3 +1,5 @@
+# Circadian benchmarking for CircaN R package
+
 Code for the benchmarking of the CircaN package previous to submission.
 The complete file structure is:
 
@@ -26,8 +28,8 @@ The complete file structure is:
     └── dependencies
 ``` 
 
-* Most of these directories contain only data files, and so are not available in the git repo. A level 2 tree is provided to help understand the project structure.
-** Please note that I reestructured all the directories to make them fit better with the Cookiecutter Data Science standard. The paths to files etc may have changed. Following is a list of changes I made:
+\* Most of these directories contain only data files, and so are not available in the git repo. A level 2 tree is provided to help understand the project structure.       
+\*\* Please note that I reestructured all the directories to make them fit better with the Cookiecutter Data Science standard. The paths to files etc may have changed. Following is a list of changes I made:
 
 - SRC/ is now src/
 - SW/ is now src/dependencies/
